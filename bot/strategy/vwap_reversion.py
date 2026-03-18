@@ -4,7 +4,8 @@ import numpy as np
 def generate_vwap_signal(
     df: pd.DataFrame,
     window: int = 20,
-    std_mult: float = 1.0
+    lower_std_mult = 0.5
+    upper_std_mult = 1.0
 ) -> pd.DataFrame:
     """
     Long-only VWAP band strategy.
@@ -31,8 +32,8 @@ def generate_vwap_signal(
     df["std"] = df["close"].rolling(window=window).std()
 
     # Bands
-    df["lower_band"] = df["vwap"] - std_mult * df["std"]
-    df["upper_band"] = df["vwap"] + std_mult * df["std"]
+    df["lower_band"] = df["vwap"] - lower_std_mult * df["std"]
+    df["upper_band"] = df["vwap"] + upper_std_mult * df["std"]
 
     # Entry / exit conditions
     entry = df["close"] < df["lower_band"]
