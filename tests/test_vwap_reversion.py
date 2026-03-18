@@ -37,4 +37,4 @@ def backtest_vwap_strategy(csv_path: str, window: int = 20, initial_cash: float 
     return df
 
 if __name__ == "__main__":
-    df_result = backtest_vwap_strategy("data/btcusdt_daily.csv", window=20)
+    df_result = backtest_vwap_strategy("bot/data/btcusdt_daily.csv", window=20)
