@@ -1,27 +1,51 @@
 import pandas as pd
 import numpy as np
 
-def generate_vwap_signal(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
+def generate_vwap_signal(
+    df: pd.DataFrame,
+    window: int = 20,
+    std_mult: float = 1.0
+) -> pd.DataFrame:
     """
-    Expects columns: open, high, low, close, volume
+    Long-only VWAP band strategy.
 
-    Returns df with:
-    - typical_price
-    - vwap
-    - signal
-        1 = buy / enter long
-        0 = exit / stay out
+    Enter long when close < lower_band
+    Exit long when close > upper_band
+    Otherwise keep previous state
+
+    Expects columns: open, high, low, close, volume
     """
     df = df.copy()
 
+    # VWAP input price
     df["typical_price"] = (df["high"] + df["low"] + df["close"]) / 3
 
+    # Rolling VWAP
     pv = df["typical_price"] * df["volume"]
     df["vwap"] = (
         pv.rolling(window=window).sum()
         / df["volume"].rolling(window=window).sum()
     )
 
-    df["signal"] = np.where(df["close"] < df["vwap"], 1, 0)
+    # Rolling standard deviation of close
+    df["std"] = df["close"].rolling(window=window).std()
+
+    # Bands
+    df["lower_band"] = df["vwap"] - std_mult * df["std"]
+    df["upper_band"] = df["vwap"] + std_mult * df["std"]
+
+    # Entry / exit conditions
+    entry = df["close"] < df["lower_band"]
+    exit_ = df["close"] > df["upper_band"]
+
+    # Desired state:
+    # 1 = long
+    # 0 = flat
+    df["signal"] = np.nan
+    df.loc[entry, "signal"] = 1
+    df.loc[exit_, "signal"] = 0
+
+    # Hold previous state when neither entry nor exit happens
+    df["signal"] = df["signal"].ffill().fillna(0)
 
     return df
