@@ -33,7 +33,11 @@ def backtest_vwap_strategy(
 
     print(f"Strategy total return: {total_return:.2%}")
     print(f"Buy and hold return:   {bh_return:.2%}")
-    print(df[["open_time", "close", "vwap", "signal", "position", "strategy_equity"]].tail(10))
+    print(df[[
+    "open_time", "close", "vwap", "std",
+    "lower_band", "upper_band", "signal",
+    "position", "strategy_equity"
+    ]].tail(10))
 
     return df
 
