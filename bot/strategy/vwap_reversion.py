@@ -6,7 +6,7 @@ def generate_vwap_signal(
     df: pd.DataFrame,
     window: int = 20,
     lower_std_mult: float = 0.75,
-    strong_exit_std_mult: float = 1.5,
+    strong_exit_std_mult: float = 2,
     trend_window: int = 100,
 ) -> pd.DataFrame:
     """
