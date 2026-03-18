@@ -4,8 +4,8 @@ import numpy as np
 def generate_vwap_signal(
     df: pd.DataFrame,
     window: int = 20,
-    lower_std_mult = 0.7,
-    upper_std_mult = 2
+    lower_std_mult = 0.75,
+    upper_std_mult = 1.9
 ) -> pd.DataFrame:
     """
     Long-only VWAP band strategy.
