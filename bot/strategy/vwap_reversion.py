@@ -7,7 +7,7 @@ def generate_vwap_signal(
     window: int = 20,
     lower_std_mult: float = 0.75,
     strong_exit_std_mult: float = 2,
-    trend_window: int = 160,
+    trend_window: int = 150,
 ) -> pd.DataFrame:
     """
     Long-only VWAP mean reversion with trend-aware exit.
@@ -38,8 +38,8 @@ def generate_vwap_signal(
     df["std"] = df["close"].rolling(window=window, min_periods=window).std()
 
     # Trend filter
-    df["sma100"] = df["close"].rolling(window=trend_window, min_periods=trend_window).mean()
-    df["uptrend"] = df["close"] > df["sma100"]
+    df["sma150"] = df["close"].rolling(window=trend_window, min_periods=trend_window).mean()
+    df["uptrend"] = df["close"] > df["sma150"]
 
     # Bands
     df["lower_band"] = df["vwap"] - lower_std_mult * df["std"]
