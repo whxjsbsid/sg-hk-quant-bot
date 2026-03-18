@@ -108,7 +108,7 @@ def backtest_vwap_strategy(
 
     print(df[[
         "open_time", "close", "vwap", "std",
-        "lower_band", "upper_band", "signal",
+        "lower_band", "strong_upper_band", "signal",
         "position", "strategy_equity"
     ]].tail(10))
 
