@@ -1,39 +1,58 @@
 import pandas as pd
+import requests
 
-from bot.strategy.vwap_reversion import generate_vwap_signal
 
-def backtest_vwap_strategy(csv_path: str, window: int = 20, initial_cash: float = 10000):
-    df = pd.read_csv(csv_path)
-    df.columns = [c.lower() for c in df.columns]
+BASE_URL = "https://api.binance.com"
 
-    if "timestamp" in df.columns:
-        df = df.sort_values("timestamp")
-    elif "date" in df.columns:
-        df = df.sort_values("date")
 
-    df = generate_vwap_signal(df, window=window)
+def load_binance_klines(symbol: str = "BTCUSDT", interval: str = "1d", limit: int = 500) -> pd.DataFrame:
+    limit = min(limit, 1000)
 
-    # Trade on next candle to avoid lookahead bias
-    df["position"] = df["signal"].shift(1).fillna(0)
+    url = f"{BASE_URL}/api/v3/klines"
+    params = {
+        "symbol": symbol.upper(),
+        "interval": interval,
+        "limit": limit,
+    }
 
-    # Asset returns
-    df["return"] = df["close"].pct_change().fillna(0)
+    response = requests.get(url, params=params, timeout=15)
+    response.raise_for_status()
+    data = response.json()
 
-    # Strategy returns: only earn returns when in long position
-    df["strategy_return"] = df["position"] * df["return"]
+    columns = [
+        "open_time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "close_time",
+        "quote_asset_volume",
+        "number_of_trades",
+        "taker_buy_base_asset_volume",
+        "taker_buy_quote_asset_volume",
+        "ignore",
+    ]
 
-    # Equity curves
-    df["buy_and_hold_equity"] = initial_cash * (1 + df["return"]).cumprod()
-    df["strategy_equity"] = initial_cash * (1 + df["strategy_return"]).cumprod()
+    df = pd.DataFrame(data, columns=columns)
 
-    total_return = df["strategy_equity"].iloc[-1] / initial_cash - 1
-    bh_return = df["buy_and_hold_equity"].iloc[-1] / initial_cash - 1
+    numeric_cols = [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "quote_asset_volume",
+        "taker_buy_base_asset_volume",
+        "taker_buy_quote_asset_volume",
+    ]
+    df[numeric_cols] = df[numeric_cols].astype(float)
+    df["number_of_trades"] = df["number_of_trades"].astype(int)
 
-    print(f"Strategy total return: {total_return:.2%}")
-    print(f"Buy and hold return:   {bh_return:.2%}")
+    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+    df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
 
-    print(df[["close", "vwap", "signal", "position", "strategy_equity"]].tail(10))
-
+    return df.sort_values("open_time").reset_index(drop=True)
     return df
 
 if __name__ == "__main__":
