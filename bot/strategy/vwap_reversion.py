@@ -1,52 +1,62 @@
 import pandas as pd
 import numpy as np
 
+
 def generate_vwap_signal(
     df: pd.DataFrame,
     window: int = 20,
-    lower_std_mult = 0.75,
-    upper_std_mult = 1.9
+    lower_std_mult: float = 0.75,
+    strong_exit_std_mult: float = 1.5,
+    trend_window: int = 100,
 ) -> pd.DataFrame:
     """
-    Long-only VWAP band strategy.
+    Long-only VWAP mean reversion with trend-aware exit.
 
-    Enter long when close < lower_band
-    Exit long when close > upper_band
-    Otherwise keep previous state
+    Entry:
+        buy when close < vwap - lower_std_mult * std
+
+    Exit:
+        if close > SMA(trend_window), use wider exit:
+            close > vwap + strong_exit_std_mult * std
+        else use tighter exit:
+            close > vwap
 
     Expects columns: open, high, low, close, volume
     """
     df = df.copy()
 
-    # VWAP input price
+    # Typical price for rolling VWAP
     df["typical_price"] = (df["high"] + df["low"] + df["close"]) / 3
 
-    # Rolling VWAP
     pv = df["typical_price"] * df["volume"]
     df["vwap"] = (
-        pv.rolling(window=window).sum()
-        / df["volume"].rolling(window=window).sum()
+        pv.rolling(window=window, min_periods=window).sum()
+        / df["volume"].rolling(window=window, min_periods=window).sum()
     )
 
-    # Rolling standard deviation of close
-    df["std"] = df["close"].rolling(window=window).std()
+    # Rolling std of close
+    df["std"] = df["close"].rolling(window=window, min_periods=window).std()
+
+    # Trend filter
+    df["sma100"] = df["close"].rolling(window=trend_window, min_periods=trend_window).mean()
+    df["uptrend"] = df["close"] > df["sma100"]
 
     # Bands
     df["lower_band"] = df["vwap"] - lower_std_mult * df["std"]
-    df["upper_band"] = df["vwap"] + upper_std_mult * df["std"]
+    df["strong_upper_band"] = df["vwap"] + strong_exit_std_mult * df["std"]
 
-    # Entry / exit conditions
+    # Rules
     entry = df["close"] < df["lower_band"]
-    exit_ = df["close"] > df["upper_band"]
 
-    # Desired state:
-    # 1 = long
-    # 0 = flat
+    exit_cond = (
+        (df["uptrend"] & (df["close"] > df["strong_upper_band"])) |
+        (~df["uptrend"] & (df["close"] > df["vwap"]))
+    )
+
+    # Stateful signal: 1 = long, 0 = flat
     df["signal"] = np.nan
     df.loc[entry, "signal"] = 1
-    df.loc[exit_, "signal"] = 0
-
-    # Hold previous state when neither entry nor exit happens
+    df.loc[exit_cond, "signal"] = 0
     df["signal"] = df["signal"].ffill().fillna(0)
 
     return df
