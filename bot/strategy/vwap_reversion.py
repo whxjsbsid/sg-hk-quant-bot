@@ -7,7 +7,7 @@ def generate_vwap_signal(
     window: int = 20,
     lower_std_mult: float = 0.75,
     strong_exit_std_mult: float = 2,
-    trend_window: int = 150,
+    trend_window: int = 200,
 ) -> pd.DataFrame:
     """
     Long-only VWAP mean reversion with trend-aware exit.
