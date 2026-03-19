@@ -36,15 +36,20 @@ This means the bot only enters and exits long positions for now.
 ```bash
 bot/
 ├── config/
-│   └── settings.py          # Config and environment settings
+│   └── settings.py
 ├── data/
-│   └── binance_loader.py    # Loads historical Binance market data
+│   └── binance_loader.py
 ├── execution/
-│   └── roostoo_client.py    # Handles Roostoo mock exchange API requests
+│   └── roostoo_client.py
 ├── logs/
-│   ├── activity_logger.py   # General bot activity logging
-│   └── trade_logger.py      # Trade-specific logging
+│   ├── activity_logger.py
+│   └── trade_logger.py
 ├── strategy/
-│   └── vwap_reversion.py    # VWAP mean reversion strategy logic
-├── main.py                  # Main bot entry point
-└── test_roostoo.py          # Simple Roostoo API connectivity test
+│   └── vwap_reversion.py
+├── main.py
+└── test_roostoo.py
+
+backtest.py              # Strategy backtesting script
+requirements.txt
+README.md
+.gitignore
