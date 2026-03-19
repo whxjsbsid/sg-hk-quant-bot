@@ -9,7 +9,7 @@ activity_logger = setup_activity_logger()
 
 
 def run_once():
-    # replace these with your actual signal outputs later
+    # temporary dummy values for testing
     pair = "BTC/USD"
     side = "BUY"
     qty = 0.01
@@ -47,7 +47,6 @@ def run_once():
 
 if __name__ == "__main__":
     run_once()
-
     activity_logger.info(f"Logged {side} trade for {pair} | order_id={order_id}")
 
 if __name__ == "__main__":
