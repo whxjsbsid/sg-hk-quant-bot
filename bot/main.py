@@ -37,13 +37,16 @@ def run_once():
             print("Not enough rows to evaluate signal.")
             return
 
+        print("\nLatest rows:")
+        print(df[["close", "vwap", "upper_band", "lower_band", "signal"]].tail(5))
+
         prev_row = df.iloc[-2]
         latest_row = df.iloc[-1]
 
         prev_signal = int(prev_row["signal"])
         latest_signal = int(latest_row["signal"])
 
-        print("prev_signal =", prev_signal)
+        print("\nprev_signal =", prev_signal)
         print("latest_signal =", latest_signal)
 
         side = None
@@ -60,7 +63,7 @@ def run_once():
             print("No trade signal.")
             return
 
-        print(f"Placing {side} order...")
+        print(f"\nPlacing {side} order...")
         order_response = client.place_order(
             pair=pair,
             side=side,
@@ -68,7 +71,39 @@ def run_once():
             order_type="MARKET",
         )
 
-        print("Order response:", order_response)
+        print("Order response:")
+        print(order_response)
+
+        print("\nUpdated balance:")
+        print(client.get_balance())
+
+        print("\nOrder query:")
+        print(client.query_order(pair=pair))
+
+        try:
+            trade_logger.log_trade({
+                "symbol": symbol,
+                "pair": pair,
+                "side": side,
+                "qty": qty,
+                "reason": signal_reason,
+                "prev_signal": prev_signal,
+                "latest_signal": latest_signal,
+                "close": float(latest_row["close"]),
+                "vwap": float(latest_row["vwap"]),
+                "upper_band": float(latest_row["upper_band"]),
+                "lower_band": float(latest_row["lower_band"]),
+                "order_response": order_response,
+            })
+        except Exception as log_error:
+            print("Trade log failed:", log_error)
+
+        try:
+            activity_logger.info(
+                f"Placed {side} order for {qty} {pair}. Reason: {signal_reason}"
+            )
+        except Exception as log_error:
+            print("Activity log failed:", log_error)
 
     except Exception as e:
         print("run_once failed:", e)
