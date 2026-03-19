@@ -2,37 +2,51 @@ from bot.execution.roostoo_client import RoostooClient
 from bot.logs.trade_logger import TradeLogger
 from bot.logs.activity_logger import setup_activity_logger
 
+
 client = RoostooClient()
 trade_logger = TradeLogger()
 activity_logger = setup_activity_logger()
 
+
 def run_once():
-    # example only
+    # replace these with your actual signal outputs later
     pair = "BTC/USD"
     side = "BUY"
     qty = 0.01
 
-    order_response = client.place_order(
-        pair=pair,
-        side=side,
-        order_type="MARKET",
-        quantity=qty,
-    )
+    try:
+        order_response = client.place_order(
+            pair=pair,
+            side=side,
+            order_type="MARKET",
+            quantity=qty,
+        )
 
-    order_id = str(order_response.get("order_id", ""))
-    executed_price = float(order_response.get("price", 0))
-    executed_qty = float(order_response.get("quantity", qty))
+        order_id = str(order_response.get("order_id", ""))
+        executed_price = float(order_response.get("price", 0))
+        executed_qty = float(order_response.get("quantity", qty))
 
-    trade_logger.log_trade(
-        symbol=pair,
-        side=side,
-        price=executed_price,
-        quantity=executed_qty,
-        order_id=order_id,
-        api_response=order_response,
-        signal_reason="your signal here",
-        strategy_state={"strategy": "vwap_reversion"},
-    )
+        trade_logger.log_trade(
+            symbol=pair,
+            side=side,
+            price=executed_price,
+            quantity=executed_qty,
+            order_id=order_id,
+            api_response=order_response,
+            signal_reason="your signal here",
+            strategy_state={"strategy": "vwap_reversion"},
+        )
+
+        activity_logger.info(
+            f"Logged {side} trade for {pair} | order_id={order_id}"
+        )
+
+    except Exception as e:
+        activity_logger.exception(f"Trade failed: {e}")
+
+
+if __name__ == "__main__":
+    run_once()
 
     activity_logger.info(f"Logged {side} trade for {pair} | order_id={order_id}")
 
