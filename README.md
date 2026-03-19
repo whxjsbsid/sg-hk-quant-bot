@@ -47,7 +47,7 @@ bot/
 ├── strategy/
 │   └── vwap_reversion.py
 ├── main.py
-└── test_roostoo.py
+└── test_roostoo.py      # Simple Roostoo API smoke test that checks balance, places a mock market order, and queries orders
 
 backtest.py              # Strategy backtesting script
 requirements.txt
