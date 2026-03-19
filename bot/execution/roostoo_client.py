@@ -125,16 +125,16 @@ class RoostooClient:
         return self._handle_response(response)
 
     def get_ticker(self, pair: Optional[str] = None) -> Dict[str, Any]:
-    params: Dict[str, Any] = {"timestamp": self._timestamp_ms()}
-    if pair:
-        params["pair"] = pair
+        params: Dict[str, Any] = {"timestamp": self._timestamp_ms()}
+        if pair:
+            params["pair"] = pair
 
-    response = self.session.get(
-        f"{self.base_url}/v3/ticker",
-        params=params,
-        timeout=self.timeout,
-    )
-    return self._handle_response(response)
+        response = self.session.get(
+            f"{self.base_url}/v3/ticker",
+            params=params,
+            timeout=self.timeout,
+        )
+        return self._handle_response(response)
 
     def get_balance(self) -> Dict[str, Any]:
         params = {"timestamp": self._timestamp_ms()}
