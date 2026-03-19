@@ -2,7 +2,7 @@ import os
 import time
 import hmac
 import hashlib
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 import requests
 
@@ -72,7 +72,12 @@ class RoostooClient:
 
         return data
 
-    def _signed_get(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    def _signed_get(
+        self,
+        path: str,
+        params: Dict[str, Any],
+        allow_false_success: bool = False,
+    ) -> Dict[str, Any]:
         sorted_params = {k: params[k] for k in sorted(params.keys())}
         headers = self._headers(signed=True)
         headers["MSG-SIGNATURE"] = self._sign(sorted_params)
@@ -83,7 +88,7 @@ class RoostooClient:
             headers=headers,
             timeout=self.timeout,
         )
-        return self._handle_response(response)
+        return self._handle_response(response, allow_false_success=allow_false_success)
 
     def _signed_post(
         self,
@@ -120,16 +125,16 @@ class RoostooClient:
         return self._handle_response(response)
 
     def get_ticker(self, pair: Optional[str] = None) -> Dict[str, Any]:
-        params: Dict[str, Any] = {"timestamp": self._timestamp_ms()}
-        if pair:
-            params["pair"] = pair
+    params: Dict[str, Any] = {"timestamp": self._timestamp_ms()}
+    if pair:
+        params["pair"] = pair
 
-        response = self.session.get(
-            f"{self.base_url}/v3/ticker",
-            params=params,
-            timeout=self.timeout,
-        )
-        return self._handle_response(response)
+    response = self.session.get(
+        f"{self.base_url}/v3/ticker",
+        params=params,
+        timeout=self.timeout,
+    )
+    return self._handle_response(response)
 
     def get_balance(self) -> Dict[str, Any]:
         params = {"timestamp": self._timestamp_ms()}
@@ -143,7 +148,11 @@ class RoostooClient:
 
     def pending_count(self) -> Dict[str, Any]:
         params = {"timestamp": self._timestamp_ms()}
-        return self._signed_get("/v3/pending_count", params)
+        return self._signed_get(
+            "/v3/pending_count",
+            params,
+            allow_false_success=True,
+        )
 
     def place_order(
         self,
@@ -170,7 +179,7 @@ class RoostooClient:
 
     def query_order(
         self,
-        order_id: Optional[int] = None,
+        order_id: Optional[Union[int, str]] = None,
         pair: Optional[str] = None,
         pending_only: Optional[bool] = None,
         offset: Optional[int] = None,
@@ -205,7 +214,7 @@ class RoostooClient:
 
     def cancel_order(
         self,
-        order_id: Optional[int] = None,
+        order_id: Optional[Union[int, str]] = None,
         pair: Optional[str] = None,
     ) -> Dict[str, Any]:
         if order_id is not None and pair is not None:
