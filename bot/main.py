@@ -8,6 +8,7 @@ from bot.logs.trade_logger import TradeLogger
 from bot.logs.activity_logger import setup_activity_logger
 from bot.data.binance_loader import load_binance_klines
 from bot.strategy.vwap_reversion import generate_vwap_signal
+from bot.config import settings
 
 
 client = RoostooClient()
@@ -18,19 +19,20 @@ activity_logger = setup_activity_logger()
 def run_once():
     print("Entered run_once")
 
-    symbol = settings.BINANCE_SYMBOL
-    pair = settings.ROOSTOO_PAIR
-    base_coin = "BTC"
-    interval = "1d"
-    limit = 300
+    symbol = getattr(settings, "BINANCE_SYMBOL", "BTCUSDT")
+    pair = getattr(settings, "ROOSTOO_PAIR", getattr(settings, "SYMBOL", "BTC/USD"))
+    interval = settings.INTERVAL
+    limit = settings.LIMIT
+    vwap_window = settings.VWAP_WINDOW
     qty = 0.01
+    base_coin = "BTC"
 
     try:
         print("Loading Binance data...")
         df = load_binance_klines(symbol=symbol, interval=interval, limit=limit)
 
         print("Generating signal...")
-        df = generate_vwap_signal(df, window=20)
+        df = generate_vwap_signal(df, window=vwap_window)
 
         print("Rows in df:", len(df))
 
@@ -71,6 +73,7 @@ def run_once():
         if prev_signal == 0 and latest_signal == 1:
             side = "BUY"
             signal_reason = "Signal flipped from 0 to 1"
+
         elif prev_signal == 1 and latest_signal == 0:
             btc_free = client.get_free_balance(base_coin)
             print(f"Free {base_coin} balance:", btc_free)
@@ -97,9 +100,9 @@ def run_once():
         print("Order response:")
         print(order_response)
 
-        order_id = order_response.get("OrderDetail", {}).get("OrderID")
+        order_id = order_response.get("OrderDetail", {}).get("OrderID", "")
 
-        if order_id is not None:
+        if order_id:
             print("\nOrder query by ID:")
             print(client.query_order(order_id=order_id))
         else:
@@ -109,23 +112,25 @@ def run_once():
         print("\nUpdated balance:")
         print(client.get_balance())
 
-        trade_payload = {
-            "symbol": symbol,
-            "pair": pair,
-            "side": side,
-            "qty": qty,
-            "reason": signal_reason,
-            "prev_signal": prev_signal,
-            "latest_signal": latest_signal,
-            "close": float(latest_row["close"]),
-            "vwap": float(latest_row["vwap"]),
-            "upper_band": float(latest_row["upper_band"]),
-            "lower_band": float(latest_row["lower_band"]),
-            "order_response": order_response,
-        }
-
         try:
-            trade_logger.log_trade(trade_payload)
+            trade_logger.log_trade(
+                symbol=symbol,
+                side=side,
+                price=float(latest_row["close"]),
+                quantity=qty,
+                order_id=str(order_id),
+                api_response=order_response,
+                pnl=None,
+                signal_reason=signal_reason,
+                strategy_state={
+                    "pair": pair,
+                    "prev_signal": prev_signal,
+                    "latest_signal": latest_signal,
+                    "vwap": float(latest_row["vwap"]),
+                    "upper_band": float(latest_row["upper_band"]),
+                    "lower_band": float(latest_row["lower_band"]),
+                },
+            )
         except Exception as log_error:
             print("Trade log failed:", log_error)
 
