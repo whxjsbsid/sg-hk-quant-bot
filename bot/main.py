@@ -20,6 +20,7 @@ def run_once():
 
     symbol = "BTCUSDT"
     pair = "BTC/USD"
+    base_coin = "BTC"
     interval = "1d"
     limit = 300
     qty = 0.01
@@ -37,8 +38,18 @@ def run_once():
             print("Not enough rows to evaluate signal.")
             return
 
+        required_cols = ["close", "vwap", "upper_band", "lower_band", "signal"]
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            print("Missing required columns:", missing_cols)
+            return
+
+        if df[required_cols].tail(2).isnull().any().any():
+            print("Latest rows contain NaN values. Skipping run.")
+            return
+
         print("\nLatest rows:")
-        print(df[["close", "vwap", "upper_band", "lower_band", "signal"]].tail(5))
+        print(df[required_cols].tail(5))
 
         prev_row = df.iloc[-2]
         latest_row = df.iloc[-1]
@@ -49,6 +60,11 @@ def run_once():
         print("\nprev_signal =", prev_signal)
         print("latest_signal =", latest_signal)
 
+        if prev_signal not in (0, 1) or latest_signal not in (0, 1):
+            print("This main.py assumes long-only signals: 0 = flat, 1 = long.")
+            print("Unexpected signal values detected.")
+            return
+
         side = None
         signal_reason = None
 
@@ -56,6 +72,13 @@ def run_once():
             side = "BUY"
             signal_reason = "Signal flipped from 0 to 1"
         elif prev_signal == 1 and latest_signal == 0:
+            btc_free = client.get_free_balance(base_coin)
+            print(f"Free {base_coin} balance:", btc_free)
+
+            if btc_free < qty:
+                print(f"Skip SELL: only {btc_free} {base_coin} available, need {qty}")
+                return
+
             side = "SELL"
             signal_reason = "Signal flipped from 1 to 0"
 
@@ -74,27 +97,35 @@ def run_once():
         print("Order response:")
         print(order_response)
 
+        order_id = order_response.get("OrderDetail", {}).get("OrderID")
+
+        if order_id is not None:
+            print("\nOrder query by ID:")
+            print(client.query_order(order_id=order_id))
+        else:
+            print("\nOrder ID not found in response. Falling back to pair query:")
+            print(client.query_order(pair=pair, limit=5))
+
         print("\nUpdated balance:")
         print(client.get_balance())
 
-        print("\nOrder query:")
-        print(client.query_order(pair=pair))
+        trade_payload = {
+            "symbol": symbol,
+            "pair": pair,
+            "side": side,
+            "qty": qty,
+            "reason": signal_reason,
+            "prev_signal": prev_signal,
+            "latest_signal": latest_signal,
+            "close": float(latest_row["close"]),
+            "vwap": float(latest_row["vwap"]),
+            "upper_band": float(latest_row["upper_band"]),
+            "lower_band": float(latest_row["lower_band"]),
+            "order_response": order_response,
+        }
 
         try:
-            trade_logger.log_trade({
-                "symbol": symbol,
-                "pair": pair,
-                "side": side,
-                "qty": qty,
-                "reason": signal_reason,
-                "prev_signal": prev_signal,
-                "latest_signal": latest_signal,
-                "close": float(latest_row["close"]),
-                "vwap": float(latest_row["vwap"]),
-                "upper_band": float(latest_row["upper_band"]),
-                "lower_band": float(latest_row["lower_band"]),
-                "order_response": order_response,
-            })
+            trade_logger.log_trade(trade_payload)
         except Exception as log_error:
             print("Trade log failed:", log_error)
 
@@ -107,6 +138,10 @@ def run_once():
 
     except Exception as e:
         print("run_once failed:", e)
+        try:
+            activity_logger.exception("run_once failed")
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
