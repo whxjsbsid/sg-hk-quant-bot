@@ -3,6 +3,7 @@ from bot.logs.trade_logger import TradeLogger
 from bot.logs.activity_logger import setup_activity_logger
 from bot.data.binance_loader import load_binance_klines
 from bot.strategy.vwap_reversion import generate_vwap_signal
+import pandas as pd
 
 
 client = RoostooClient()
@@ -21,12 +22,18 @@ def run_once():
         df = load_binance_klines(symbol=symbol, interval=interval, limit=limit)
         df = generate_vwap_signal(df, window=20)
 
-        if len(df) < 2:
-            activity_logger.info("Not enough rows to evaluate signal.")
+        closed_df = df.iloc[:-1].copy()
+
+        if len(closed_df) < 2:
+            activity_logger.info("Not enough closed rows to evaluate signal.")
             return
 
-        prev_row = df.iloc[-2]
-        latest_row = df.iloc[-1]
+        prev_row = closed_df.iloc[-2]
+        latest_row = closed_df.iloc[-1]
+
+        if pd.isna(prev_row["signal"]) or pd.isna(latest_row["signal"]):
+            activity_logger.info("Signal not ready yet.")
+            return
 
         prev_signal = int(prev_row["signal"])
         latest_signal = int(latest_row["signal"])
@@ -62,6 +69,8 @@ def run_once():
             order_type="MARKET",
             quantity=qty,
         )
+
+        activity_logger.info(f"Raw order response: {order_response}")
 
         order_id = str(order_response.get("order_id", ""))
         executed_price = float(order_response.get("price", latest_row["close"]))
