@@ -1,8 +1,6 @@
 from bot.execution.roostoo_client import RoostooClient
 from bot.logs.trade_logger import TradeLogger
 from bot.logs.activity_logger import setup_activity_logger
-from bot.data.binance_loader import load_binance_klines
-from bot.strategy.vwap_reversion import generate_vwap_signal
 
 
 client = RoostooClient()
@@ -11,56 +9,11 @@ activity_logger = setup_activity_logger()
 
 
 def run_once():
-    symbol = "BTCUSDT"   # Binance symbol for data
-    pair = "BTC/USD"     # Roostoo pair for order placement
-    interval = "1d"
-    limit = 300
+    pair = "BTC/USD"
+    side = "BUY"
     qty = 0.01
 
     try:
-        df = load_binance_klines(symbol=symbol, interval=interval, limit=limit)
-        df = generate_vwap_signal(df, window=20)
-
-        if len(df) < 2:
-            activity_logger.info("Not enough rows to evaluate signal.")
-            return
-
-        prev_row = df.iloc[-2]
-        latest_row = df.iloc[-1]
-
-        if prev_row["signal"] != prev_row["signal"] or latest_row["signal"] != latest_row["signal"]:
-            activity_logger.info("Signal not ready yet due to rolling window / NaN values.")
-            return
-
-        prev_signal = int(prev_row["signal"])
-        latest_signal = int(latest_row["signal"])
-
-        side = None
-        signal_reason = None
-
-        # Only trade on signal transitions
-        if prev_signal == 0 and latest_signal == 1:
-            side = "BUY"
-            signal_reason = "Entry: close < lower_band"
-        elif prev_signal == 1 and latest_signal == 0:
-            side = "SELL"
-            signal_reason = "Exit condition met"
-
-        if side is None:
-            activity_logger.info(
-                f"No new trade. prev_signal={prev_signal}, latest_signal={latest_signal}"
-            )
-            return
-
-        strategy_state = {
-            "close": float(latest_row["close"]),
-            "vwap": float(latest_row["vwap"]),
-            "std": float(latest_row["std"]),
-            "lower_band": float(latest_row["lower_band"]),
-            "strong_upper_band": float(latest_row["strong_upper_band"]),
-            "signal": latest_signal,
-        }
-
         order_response = client.place_order(
             pair=pair,
             side=side,
@@ -68,27 +21,42 @@ def run_once():
             quantity=qty,
         )
 
-        order_id = str(order_response.get("order_id", ""))
-        logged_price = float(order_response.get("price", latest_row["close"]))
-        logged_qty = float(order_response.get("quantity", qty))
+        if not order_response or not order_response.get("Success"):
+            err_msg = order_response.get("ErrMsg", "Unknown error") if order_response else "No response"
+            activity_logger.error(f"Trade failed: {err_msg}")
+            return
+
+        order_detail = order_response.get("OrderDetail", {})
+
+        order_id = str(order_detail.get("OrderID", ""))
+        status = order_detail.get("Status", "")
+        executed_price = float(order_detail.get("FilledAverPrice") or order_detail.get("Price") or 0)
+        executed_qty = float(order_detail.get("FilledQuantity") or order_detail.get("Quantity") or qty)
 
         trade_logger.log_trade(
             symbol=pair,
             side=side,
-            price=logged_price,
-            quantity=logged_qty,
+            price=executed_price,
+            quantity=executed_qty,
             order_id=order_id,
             api_response=order_response,
-            signal_reason=signal_reason,
-            strategy_state=strategy_state,
+            signal_reason="your signal here",
+            strategy_state={
+                "strategy": "vwap_reversion",
+                "status": status,
+            },
         )
 
         activity_logger.info(
-            f"Logged {side} trade for {pair} | order_id={order_id}"
+            f"Logged {side} trade for {pair} | order_id={order_id} | status={status}"
         )
 
     except Exception as e:
         activity_logger.exception(f"Trade failed: {e}")
+
+
+if __name__ == "__main__":
+    run_once()
 
 
 if __name__ == "__main__":
