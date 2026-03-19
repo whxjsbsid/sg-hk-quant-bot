@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 from bot.execution.roostoo_client import RoostooClient
 from bot.logs.trade_logger import TradeLogger
 from bot.logs.activity_logger import setup_activity_logger
