@@ -1,9 +1,8 @@
-import hashlib
-import hmac
 import os
 import time
+import hmac
+import hashlib
 from typing import Any, Dict, Optional
-from urllib.parse import urlencode
 
 import requests
 
@@ -13,185 +12,151 @@ class RoostooClient:
         self,
         api_key: Optional[str] = None,
         api_secret: Optional[str] = None,
-        base_url: str = "https://mock-api.roostoo.com",
-        timeout: int = 15,
-    ) -> None:
-        self.api_key = api_key or os.getenv("ROOSTOO_API_KEY")
-        self.api_secret = api_secret or os.getenv("ROOSTOO_API_SECRET")
-        self.base_url = base_url.rstrip("/")
+        base_url: Optional[str] = None,
+        timeout: int = 10,
+    ):
+        self.api_key = api_key or os.getenv("ROOSTOO_API_KEY", "")
+        self.api_secret = api_secret or os.getenv("ROOSTOO_API_SECRET", "")
+        self.base_url = (base_url or os.getenv("ROOSTOO_BASE_URL", "https://mock-api.roostoo.com")).rstrip("/")
         self.timeout = timeout
+        self.session = requests.Session()
 
     @staticmethod
-    def _timestamp_ms() -> str:
-        return str(int(time.time() * 1000))
+    def _timestamp_ms() -> int:
+        return int(time.time() * 1000)
 
-    @staticmethod
-    def _serialize_params(params: Dict[str, Any]) -> str:
-        cleaned = {k: v for k, v in params.items() if v is not None}
-        sorted_items = sorted(cleaned.items(), key=lambda x: x[0])
-        return urlencode(sorted_items)
+    def _build_query_string(self, params: Dict[str, Any]) -> str:
+        return "&".join(f"{k}={params[k]}" for k in sorted(params.keys()))
 
-    def _sign(self, params: Dict[str, Any]) -> tuple[str, str]:
-        if not self.api_secret:
-            raise ValueError("Missing ROOSTOO_API_SECRET")
-        payload = self._serialize_params(params)
-        signature = hmac.new(
+    def _sign(self, params: Dict[str, Any]) -> str:
+        query_string = self._build_query_string(params)
+        return hmac.new(
             self.api_secret.encode("utf-8"),
-            payload.encode("utf-8"),
+            query_string.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
-        return payload, signature
 
-    def _request(
-        self,
-        method: str,
-        path: str,
-        *,
-        params: Optional[Dict[str, Any]] = None,
-        signed: bool = False,
-        ts_only: bool = False,
-    ) -> Dict[str, Any]:
-        params = dict(params or {})
-        headers: Dict[str, str] = {}
-
-        if signed or ts_only:
-            params["timestamp"] = self._timestamp_ms()
-
+    def _headers(self, signed: bool = False) -> Dict[str, str]:
+        headers = {}
         if signed:
-            if not self.api_key:
-                raise ValueError("Missing ROOSTOO_API_KEY")
-            payload, signature = self._sign(params)
             headers["RST-API-KEY"] = self.api_key
-            headers["MSG-SIGNATURE"] = signature
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+        return headers
 
-            if method.upper() == "GET":
-                url = f"{self.base_url}{path}?{payload}"
-                response = requests.get(url, headers=headers, timeout=self.timeout)
-            else:
-                headers["Content-Type"] = "application/x-www-form-urlencoded"
-                url = f"{self.base_url}{path}"
-                response = requests.post(url, headers=headers, data=payload, timeout=self.timeout)
-        else:
-            url = f"{self.base_url}{path}"
-            if method.upper() == "GET":
-                response = requests.get(url, params=params, headers=headers, timeout=self.timeout)
-            else:
-                headers["Content-Type"] = "application/x-www-form-urlencoded"
-                response = requests.post(url, headers=headers, data=params, timeout=self.timeout)
-
+    def _handle_response(self, response: requests.Response) -> Dict[str, Any]:
         response.raise_for_status()
         data = response.json()
 
-        # Roostoo often returns {"Success": false, "ErrMsg": "..."} with HTTP 200
+        # Roostoo often returns Success=false instead of 4xx/5xx
         if isinstance(data, dict) and data.get("Success") is False:
-            raise RuntimeError(f"Roostoo API error: {data.get('ErrMsg', 'Unknown error')}")
+            err = data.get("ErrMsg", "Unknown Roostoo API error")
+            raise RuntimeError(err)
 
         return data
 
-    # ---------- public ----------
-    def server_time(self) -> Dict[str, Any]:
-        return self._request("GET", "/v3/serverTime")
+    def get_server_time(self) -> Dict[str, Any]:
+        url = f"{self.base_url}/v3/serverTime"
+        response = self.session.get(url, timeout=self.timeout)
+        return self._handle_response(response)
 
-    def exchange_info(self) -> Dict[str, Any]:
-        return self._request("GET", "/v3/exchangeInfo")
+    def get_exchange_info(self) -> Dict[str, Any]:
+        url = f"{self.base_url}/v3/exchangeInfo"
+        response = self.session.get(url, timeout=self.timeout)
+        return self._handle_response(response)
 
-    def ticker(self, pair: Optional[str] = None) -> Dict[str, Any]:
-        params = {"pair": pair} if pair else {}
-        return self._request("GET", "/v3/ticker", params=params, ts_only=True)
+    def get_ticker(self, pair: Optional[str] = None) -> Dict[str, Any]:
+        url = f"{self.base_url}/v3/ticker"
+        params: Dict[str, Any] = {"timestamp": self._timestamp_ms()}
+        if pair:
+            params["pair"] = pair
 
-    # ---------- signed ----------
-    def balance(self) -> Dict[str, Any]:
-        return self._request("GET", "/v3/balance", signed=True)
+        response = self.session.get(url, params=params, timeout=self.timeout)
+        return self._handle_response(response)
+
+    def get_balance(self) -> Dict[str, Any]:
+        url = f"{self.base_url}/v3/balance"
+        params = {"timestamp": self._timestamp_ms()}
+        headers = self._headers(signed=True)
+        headers["MSG-SIGNATURE"] = self._sign(params)
+
+        response = self.session.get(url, params=params, headers=headers, timeout=self.timeout)
+        return self._handle_response(response)
 
     def pending_count(self) -> Dict[str, Any]:
-        return self._request("GET", "/v3/pending_count", signed=True)
+        url = f"{self.base_url}/v3/pending_count"
+        params = {"timestamp": self._timestamp_ms()}
+        headers = self._headers(signed=True)
+        headers["MSG-SIGNATURE"] = self._sign(params)
+
+        response = self.session.get(url, params=params, headers=headers, timeout=self.timeout)
+        return self._handle_response(response)
 
     def place_order(
         self,
-        *,
         pair: str,
         side: str,
-        order_type: str,
-        quantity: str | float,
-        price: Optional[str | float] = None,
+        quantity: float,
+        order_type: str = "MARKET",
+        price: Optional[float] = None,
     ) -> Dict[str, Any]:
-        side = side.upper()
-        order_type = order_type.upper()
-
-        if side not in {"BUY", "SELL"}:
-            raise ValueError("side must be BUY or SELL")
-        if order_type not in {"MARKET", "LIMIT"}:
-            raise ValueError("order_type must be MARKET or LIMIT")
-        if order_type == "LIMIT" and price is None:
-            raise ValueError("LIMIT orders require price")
+        url = f"{self.base_url}/v3/place_order"
 
         payload: Dict[str, Any] = {
+            "timestamp": self._timestamp_ms(),
             "pair": pair,
-            "side": side,
-            "type": order_type,
-            "quantity": str(quantity),
+            "side": side.upper(),
+            "quantity": quantity,
+            "type": order_type.upper(),
         }
-        if price is not None:
-            payload["price"] = str(price)
 
-        return self._request("POST", "/v3/place_order", params=payload, signed=True)
+        if payload["type"] == "LIMIT":
+            if price is None:
+                raise ValueError("LIMIT order requires price")
+            payload["price"] = price
+
+        headers = self._headers(signed=True)
+        headers["MSG-SIGNATURE"] = self._sign(payload)
+
+        response = self.session.post(url, data=payload, headers=headers, timeout=self.timeout)
+        return self._handle_response(response)
 
     def query_order(
         self,
-        *,
-        order_id: Optional[int | str] = None,
+        order_id: Optional[int] = None,
         pair: Optional[str] = None,
-        offset: Optional[int] = None,
-        limit: Optional[int] = None,
         pending_only: Optional[bool] = None,
     ) -> Dict[str, Any]:
-        if order_id is not None and any(v is not None for v in [pair, offset, limit, pending_only]):
-            raise ValueError("When order_id is provided, do not pass pair/offset/limit/pending_only")
+        url = f"{self.base_url}/v3/query_order"
 
-        payload: Dict[str, Any] = {}
+        payload: Dict[str, Any] = {"timestamp": self._timestamp_ms()}
         if order_id is not None:
-            payload["order_id"] = str(order_id)
-        else:
-            if pair is not None:
-                payload["pair"] = pair
-            if offset is not None:
-                payload["offset"] = str(offset)
-            if limit is not None:
-                payload["limit"] = str(limit)
-            if pending_only is not None:
-                payload["pending_only"] = "TRUE" if pending_only else "FALSE"
+            payload["order_id"] = order_id
+        if pair is not None:
+            payload["pair"] = pair
+        if pending_only is not None:
+            payload["pending_only"] = pending_only
 
-        return self._request("POST", "/v3/query_order", params=payload, signed=True)
+        headers = self._headers(signed=True)
+        headers["MSG-SIGNATURE"] = self._sign(payload)
+
+        response = self.session.post(url, data=payload, headers=headers, timeout=self.timeout)
+        return self._handle_response(response)
 
     def cancel_order(
         self,
-        *,
-        order_id: Optional[int | str] = None,
+        order_id: Optional[int] = None,
         pair: Optional[str] = None,
     ) -> Dict[str, Any]:
-        if order_id is not None and pair is not None:
-            raise ValueError("Pass either order_id or pair, not both")
+        url = f"{self.base_url}/v3/cancel_order"
 
-        payload: Dict[str, Any] = {}
+        payload: Dict[str, Any] = {"timestamp": self._timestamp_ms()}
         if order_id is not None:
-            payload["order_id"] = str(order_id)
-        elif pair is not None:
+            payload["order_id"] = order_id
+        if pair is not None:
             payload["pair"] = pair
 
-        return self._request("POST", "/v3/cancel_order", params=payload, signed=True)
+        headers = self._headers(signed=True)
+        headers["MSG-SIGNATURE"] = self._sign(payload)
 
-
-if __name__ == "__main__":
-    client = RoostooClient()
-
-    print("Server time:")
-    print(client.server_time())
-
-    print("\nExchange info:")
-    print(client.exchange_info())
-
-    print("\nTicker BTC/USD:")
-    print(client.ticker("BTC/USD"))
-
-    print("\nBalance:")
-    print(client.balance())
+        response = self.session.post(url, data=payload, headers=headers, timeout=self.timeout)
+        return self._handle_response(response)
