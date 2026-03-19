@@ -18,8 +18,8 @@ activity_logger = setup_activity_logger()
 def run_once():
     print("Entered run_once")
 
-    symbol = "BTCUSDT"
-    pair = "BTC/USD"
+    symbol = settings.BINANCE_SYMBOL
+    pair = settings.ROOSTOO_PAIR
     base_coin = "BTC"
     interval = "1d"
     limit = 300
