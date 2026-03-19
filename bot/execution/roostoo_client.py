@@ -23,12 +23,17 @@ class RoostooClient:
         self.timeout = timeout
         self.session = requests.Session()
 
+        if not self.api_key:
+            raise ValueError("Missing ROOSTOO_API_KEY")
+        if not self.api_secret:
+            raise ValueError("Missing ROOSTOO_API_SECRET")
+
     @staticmethod
     def _timestamp_ms() -> int:
         return int(time.time() * 1000)
 
     def _build_query_string(self, params: Dict[str, Any]) -> str:
-        return "&".join(f"{k}={params[k]}" for k in sorted(params.keys()))
+        return "&".join(f"{k}={str(params[k])}" for k in sorted(params.keys()))
 
     def _sign(self, params: Dict[str, Any]) -> str:
         query_string = self._build_query_string(params)
@@ -39,7 +44,7 @@ class RoostooClient:
         ).hexdigest()
 
     def _headers(self, signed: bool = False) -> Dict[str, str]:
-        headers = {}
+        headers: Dict[str, str] = {}
         if signed:
             headers["RST-API-KEY"] = self.api_key
             headers["Content-Type"] = "application/x-www-form-urlencoded"
@@ -51,7 +56,11 @@ class RoostooClient:
         allow_false_success: bool = False,
     ) -> Dict[str, Any]:
         response.raise_for_status()
-        data = response.json()
+
+        try:
+            data = response.json()
+        except ValueError:
+            raise RuntimeError(f"Non-JSON response from Roostoo: {response.text}")
 
         if (
             isinstance(data, dict)
@@ -64,12 +73,13 @@ class RoostooClient:
         return data
 
     def _signed_get(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        sorted_params = {k: params[k] for k in sorted(params.keys())}
         headers = self._headers(signed=True)
-        headers["MSG-SIGNATURE"] = self._sign(params)
+        headers["MSG-SIGNATURE"] = self._sign(sorted_params)
 
         response = self.session.get(
             f"{self.base_url}{path}",
-            params=params,
+            params=sorted_params,
             headers=headers,
             timeout=self.timeout,
         )
@@ -81,11 +91,11 @@ class RoostooClient:
         payload: Dict[str, Any],
         allow_false_success: bool = False,
     ) -> Dict[str, Any]:
+        sorted_payload = {k: payload[k] for k in sorted(payload.keys())}
         headers = self._headers(signed=True)
-        headers["MSG-SIGNATURE"] = self._sign(payload)
+        headers["MSG-SIGNATURE"] = self._sign(sorted_payload)
 
-        # send the exact sorted form string that was signed
-        body = self._build_query_string(payload)
+        body = self._build_query_string(sorted_payload)
 
         response = self.session.post(
             f"{self.base_url}{path}",
@@ -96,11 +106,17 @@ class RoostooClient:
         return self._handle_response(response, allow_false_success=allow_false_success)
 
     def get_server_time(self) -> Dict[str, Any]:
-        response = self.session.get(f"{self.base_url}/v3/serverTime", timeout=self.timeout)
+        response = self.session.get(
+            f"{self.base_url}/v3/serverTime",
+            timeout=self.timeout,
+        )
         return self._handle_response(response)
 
     def get_exchange_info(self) -> Dict[str, Any]:
-        response = self.session.get(f"{self.base_url}/v3/exchangeInfo", timeout=self.timeout)
+        response = self.session.get(
+            f"{self.base_url}/v3/exchangeInfo",
+            timeout=self.timeout,
+        )
         return self._handle_response(response)
 
     def get_ticker(self, pair: Optional[str] = None) -> Dict[str, Any]:
@@ -119,19 +135,15 @@ class RoostooClient:
         params = {"timestamp": self._timestamp_ms()}
         return self._signed_get("/v3/balance", params)
 
+    def get_free_balance(self, coin: str) -> float:
+        data = self.get_balance()
+        wallet = data.get("Wallet", {})
+        coin_info = wallet.get(coin, {})
+        return float(coin_info.get("Free", 0))
+
     def pending_count(self) -> Dict[str, Any]:
         params = {"timestamp": self._timestamp_ms()}
-        headers = self._headers(signed=True)
-        headers["MSG-SIGNATURE"] = self._sign(params)
-
-        response = self.session.get(
-            f"{self.base_url}/v3/pending_count",
-            params=params,
-            headers=headers,
-            timeout=self.timeout,
-        )
-        # allow Success=false when there are simply no pending orders
-        return self._handle_response(response, allow_false_success=True)
+        return self._signed_get("/v3/pending_count", params)
 
     def place_order(
         self,
@@ -167,7 +179,9 @@ class RoostooClient:
         if order_id is not None and any(
             x is not None for x in [pair, pending_only, offset, limit]
         ):
-            raise ValueError("When order_id is sent, do not send pair/pending_only/offset/limit")
+            raise ValueError(
+                "When order_id is sent, do not send pair/pending_only/offset/limit"
+            )
 
         payload: Dict[str, Any] = {"timestamp": self._timestamp_ms()}
 
@@ -198,9 +212,12 @@ class RoostooClient:
             raise ValueError("Send only one of order_id or pair")
 
         payload: Dict[str, Any] = {"timestamp": self._timestamp_ms()}
+
         if order_id is not None:
             payload["order_id"] = str(order_id)
         elif pair is not None:
             payload["pair"] = pair
+        else:
+            raise ValueError("Send either order_id or pair")
 
         return self._signed_post("/v3/cancel_order", payload)
