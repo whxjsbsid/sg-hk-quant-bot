@@ -1,6 +1,8 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+print("bot.main started")
+
 from bot.execution.roostoo_client import RoostooClient
 from bot.logs.trade_logger import TradeLogger
 from bot.logs.activity_logger import setup_activity_logger
@@ -14,6 +16,8 @@ activity_logger = setup_activity_logger()
 
 
 def run_once():
+    print("Entered run_once")
+
     symbol = "BTCUSDT"
     pair = "BTC/USD"
     interval = "1d"
@@ -21,11 +25,16 @@ def run_once():
     qty = 0.01
 
     try:
+        print("Loading Binance data...")
         df = load_binance_klines(symbol=symbol, interval=interval, limit=limit)
+
+        print("Generating signal...")
         df = generate_vwap_signal(df, window=20)
 
+        print("Rows in df:", len(df))
+
         if len(df) < 2:
-            activity_logger.info("Not enough rows to evaluate signal.")
+            print("Not enough rows to evaluate signal.")
             return
 
         prev_row = df.iloc[-2]
@@ -33,6 +42,9 @@ def run_once():
 
         prev_signal = int(prev_row["signal"])
         latest_signal = int(latest_row["signal"])
+
+        print("prev_signal =", prev_signal)
+        print("latest_signal =", latest_signal)
 
         side = None
         signal_reason = None
@@ -45,11 +57,10 @@ def run_once():
             signal_reason = "Signal flipped from 1 to 0"
 
         if side is None:
-            activity_logger.info(
-                f"No trade. prev_signal={prev_signal}, latest_signal={latest_signal}"
-            )
+            print("No trade signal.")
             return
 
+        print(f"Placing {side} order...")
         order_response = client.place_order(
             pair=pair,
             side=side,
@@ -57,28 +68,13 @@ def run_once():
             order_type="MARKET",
         )
 
-        activity_logger.info(
-            f"Placed {side} order for {qty} {pair}. Reason: {signal_reason}"
-        )
-
-        trade_logger.log_trade({
-            "symbol": symbol,
-            "pair": pair,
-            "side": side,
-            "qty": qty,
-            "reason": signal_reason,
-            "prev_signal": prev_signal,
-            "latest_signal": latest_signal,
-            "close": float(latest_row["close"]),
-            "vwap": float(latest_row["vwap"]),
-            "upper_band": float(latest_row.get("upper_band", 0)),
-            "lower_band": float(latest_row.get("lower_band", 0)),
-            "order_response": order_response,
-        })
+        print("Order response:", order_response)
 
     except Exception as e:
-        activity_logger.exception(f"run_once failed: {e}")
+        print("run_once failed:", e)
 
 
 if __name__ == "__main__":
+    print("Starting bot...")
     run_once()
+    print("Bot finished.")
