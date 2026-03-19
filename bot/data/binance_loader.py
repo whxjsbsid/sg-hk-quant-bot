@@ -1,11 +1,17 @@
 import pandas as pd
 import requests
 
+from bot.config import settings
+
 
 BASE_URL = "https://api.binance.com"
 
 
-def load_binance_klines(symbol: str = "BTCUSDT", interval: str = "1d", limit: int = 500) -> pd.DataFrame:
+def load_binance_klines(
+    symbol: str = settings.BINANCE_SYMBOL,
+    interval: str = settings.INTERVAL,
+    limit: int = settings.LIMIT,
+) -> pd.DataFrame:
     limit = min(limit, 1000)
 
     url = f"{BASE_URL}/api/v3/klines"
@@ -18,6 +24,9 @@ def load_binance_klines(symbol: str = "BTCUSDT", interval: str = "1d", limit: in
     response = requests.get(url, params=params, timeout=15)
     response.raise_for_status()
     data = response.json()
+
+    if not data:
+        raise ValueError("No kline data returned from Binance")
 
     columns = [
         "open_time",
