@@ -50,10 +50,12 @@ class TradeLogger:
             "price": price,
             "quantity": quantity,
             "order_id": order_id,
-            "api_response": json.dumps(api_response, ensure_ascii=False),
+            "api_response": json.dumps(api_response, ensure_ascii=False, default=str),
             "pnl": pnl if pnl is not None else "",
             "signal_reason": signal_reason or "",
-            "strategy_state": json.dumps(strategy_state, ensure_ascii=False) if strategy_state else "",
+            "strategy_state": json.dumps(strategy_state, ensure_ascii=False, default=str)
+            if strategy_state
+            else "",
         }
 
         with open(self.file_path, "a", newline="", encoding="utf-8") as f:
