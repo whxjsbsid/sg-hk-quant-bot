@@ -1,4 +1,5 @@
 import time
+from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -82,7 +83,7 @@ def extract_order_status(obj) -> str:
     return str(value).strip().upper() if value not in (None, "") else ""
 
 
-def extract_fill_price(*objs, fallback: float | None = None) -> float | None:
+def extract_fill_price(*objs, fallback: Optional[float] = None) -> Optional[float]:
     price_keys = {
         "avgprice",
         "averageprice",
