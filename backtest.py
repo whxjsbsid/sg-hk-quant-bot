@@ -16,7 +16,11 @@ def get_periods_per_year(interval: str) -> int:
     return mapping.get(interval, 365)
 
 
-def compute_metrics(return_series: pd.Series, equity_series: pd.Series, periods_per_year: int):
+def compute_metrics(
+    return_series: pd.Series,
+    equity_series: pd.Series,
+    periods_per_year: int,
+) -> dict:
     r = return_series.dropna().copy()
 
     if len(r) == 0:
@@ -58,17 +62,58 @@ def compute_metrics(return_series: pd.Series, equity_series: pd.Series, periods_
     }
 
 
+def compute_trade_stats(df: pd.DataFrame) -> dict:
+    out = df.copy()
+
+    out["position_change"] = out["position"].diff().fillna(out["position"])
+    out["entry"] = out["position_change"] > 0
+    out["exit"] = out["position_change"] < 0
+    out["trade_event"] = out["entry"] | out["exit"]
+
+    entries = int(out["entry"].sum())
+    exits = int(out["exit"].sum())
+    total_orders = entries + exits
+    round_trips = min(entries, exits)
+
+    if "open_time" in out.columns:
+        out["trade_date"] = pd.to_datetime(out["open_time"]).dt.date
+    else:
+        out["trade_date"] = pd.RangeIndex(len(out))
+
+    active_days = int(out.loc[out["trade_event"], "trade_date"].nunique()) if total_orders > 0 else 0
+
+    if len(out) > 0 and "open_time" in out.columns:
+        start_ts = pd.to_datetime(out["open_time"].iloc[0])
+        end_ts = pd.to_datetime(out["open_time"].iloc[-1])
+        sample_days = max((end_ts - start_ts).total_seconds() / 86400, 1e-9)
+    else:
+        sample_days = 0.0
+
+    orders_per_day_all = total_orders / sample_days if sample_days > 0 else 0.0
+    orders_per_active_day = total_orders / active_days if active_days > 0 else 0.0
+
+    return {
+        "entries": entries,
+        "exits": exits,
+        "total_orders": total_orders,
+        "round_trips": round_trips,
+        "active_days": active_days,
+        "orders_per_day_all": orders_per_day_all,
+        "orders_per_active_day": orders_per_active_day,
+    }
+
+
 def backtest_vwap_strategy(
     symbol: str = "BTCUSDT",
     interval: str = "1h",
-    limit: int = 500,
+    limit: int = 1000,
     window: int = 20,
     initial_cash: float = 10000,
 ) -> pd.DataFrame:
     df = load_binance_klines(symbol=symbol, interval=interval, limit=limit)
     df = generate_vwap_signal(df, window=window)
 
-    df["position"] = df["signal"].shift(1).fillna(0)
+    df["position"] = df["signal"].shift(1).fillna(0).astype(int)
     df["return"] = df["close"].pct_change().fillna(0)
     df["strategy_return"] = df["position"] * df["return"]
 
@@ -80,11 +125,31 @@ def backtest_vwap_strategy(
 
     periods_per_year = get_periods_per_year(interval)
 
-    strategy_metrics = compute_metrics(df["strategy_return"], df["strategy_equity"], periods_per_year=periods_per_year)
-    bh_metrics = compute_metrics(df["return"], df["buy_and_hold_equity"], periods_per_year=periods_per_year)
+    strategy_metrics = compute_metrics(
+        df["strategy_return"],
+        df["strategy_equity"],
+        periods_per_year=periods_per_year,
+    )
+    bh_metrics = compute_metrics(
+        df["return"],
+        df["buy_and_hold_equity"],
+        periods_per_year=periods_per_year,
+    )
+
+    trade_stats = compute_trade_stats(df)
 
     print(f"Strategy total return: {strategy_total_return:.2%}")
     print(f"Buy and hold return:   {bh_total_return:.2%}")
+    print()
+
+    print("Trade frequency")
+    print(f"Entries:               {trade_stats['entries']}")
+    print(f"Exits:                 {trade_stats['exits']}")
+    print(f"Total orders:          {trade_stats['total_orders']}")
+    print(f"Completed round trips: {trade_stats['round_trips']}")
+    print(f"Active trading days:   {trade_stats['active_days']}")
+    print(f"Orders / day:          {trade_stats['orders_per_day_all']:.2f}")
+    print(f"Orders / active day:   {trade_stats['orders_per_active_day']:.2f}")
     print()
 
     print("Strategy metrics")
