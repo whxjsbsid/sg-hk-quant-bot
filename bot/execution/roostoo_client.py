@@ -14,6 +14,7 @@ class RoostooClient:
         api_secret: Optional[str] = None,
         base_url: Optional[str] = None,
         timeout: int = 10,
+        balance_cache_ttl: float = 1.0,
     ):
         self.api_key = api_key or os.getenv("ROOSTOO_API_KEY", "")
         self.api_secret = api_secret or os.getenv("ROOSTOO_API_SECRET", "")
@@ -21,7 +22,11 @@ class RoostooClient:
             base_url or os.getenv("ROOSTOO_BASE_URL", "https://mock-api.roostoo.com")
         ).rstrip("/")
         self.timeout = timeout
+        self.balance_cache_ttl = balance_cache_ttl
         self.session = requests.Session()
+
+        self._last_balance_snapshot: Optional[Dict[str, Any]] = None
+        self._last_balance_ts: float = 0.0
 
         if not self.api_key:
             raise ValueError("Missing ROOSTOO_API_KEY")
@@ -31,6 +36,15 @@ class RoostooClient:
     @staticmethod
     def _timestamp_ms() -> int:
         return int(time.time() * 1000)
+
+    @staticmethod
+    def _to_float(value: Any, default: float = 0.0) -> float:
+        try:
+            if value is None or value == "":
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
     def _build_query_string(self, params: Dict[str, Any]) -> str:
         return "&".join(f"{k}={str(params[k])}" for k in sorted(params.keys()))
@@ -110,6 +124,29 @@ class RoostooClient:
         )
         return self._handle_response(response, allow_false_success=allow_false_success)
 
+    @staticmethod
+    def extract_free_balance(balance: Dict[str, Any], asset: str) -> float:
+        asset = asset.upper()
+
+        if not isinstance(balance, dict):
+            return 0.0
+
+        for wallet_name in ("SpotWallet", "MarginWallet"):
+            wallet = balance.get(wallet_name, {})
+            if not isinstance(wallet, dict):
+                continue
+
+            if asset in wallet:
+                asset_info = wallet.get(asset, {})
+                if isinstance(asset_info, dict):
+                    return RoostooClient._to_float(asset_info.get("Free", 0), 0.0)
+
+            for coin, asset_info in wallet.items():
+                if str(coin).upper() == asset and isinstance(asset_info, dict):
+                    return RoostooClient._to_float(asset_info.get("Free", 0), 0.0)
+
+        return 0.0
+
     def get_server_time(self) -> Dict[str, Any]:
         response = self.session.get(
             f"{self.base_url}/v3/serverTime",
@@ -136,32 +173,31 @@ class RoostooClient:
         )
         return self._handle_response(response)
 
-    def get_balance(self) -> Dict[str, Any]:
-        params = {"timestamp": self._timestamp_ms()}
-        return self._signed_get("/v3/balance", params)
+    def get_balance(self, force_refresh: bool = False) -> Dict[str, Any]:
+        now = time.time()
 
-    def get_free_balance(self, asset: str) -> float:
-        asset = asset.upper()
-        balance = self.get_balance()
-    
-        if not isinstance(balance, dict):
-            return 0.0
-    
-        for wallet_name in ("SpotWallet", "MarginWallet"):
-            wallet = balance.get(wallet_name, {})
-            if not isinstance(wallet, dict):
-                continue
-    
-            if asset in wallet:
-                asset_info = wallet.get(asset, {})
-                if isinstance(asset_info, dict):
-                    return float(asset_info.get("Free", 0) or 0)
-    
-            for coin, asset_info in wallet.items():
-                if str(coin).upper() == asset and isinstance(asset_info, dict):
-                    return float(asset_info.get("Free", 0) or 0)
-    
-        return 0.0
+        if (
+            not force_refresh
+            and self._last_balance_snapshot is not None
+            and (now - self._last_balance_ts) <= self.balance_cache_ttl
+        ):
+            return self._last_balance_snapshot
+
+        params = {"timestamp": self._timestamp_ms()}
+        balance = self._signed_get("/v3/balance", params)
+
+        self._last_balance_snapshot = balance
+        self._last_balance_ts = now
+        return balance
+
+    def get_free_balance(
+        self,
+        asset: str,
+        balance_snapshot: Optional[Dict[str, Any]] = None,
+        force_refresh: bool = False,
+    ) -> float:
+        balance = balance_snapshot if balance_snapshot is not None else self.get_balance(force_refresh=force_refresh)
+        return self.extract_free_balance(balance, asset)
 
     def pending_count(self) -> Dict[str, Any]:
         params = {"timestamp": self._timestamp_ms()}
@@ -192,7 +228,13 @@ class RoostooClient:
                 raise ValueError("LIMIT order requires price")
             payload["price"] = str(price)
 
-        return self._signed_post("/v3/place_order", payload)
+        result = self._signed_post("/v3/place_order", payload)
+
+        # Balance likely changed after an order attempt, so clear cache.
+        self._last_balance_snapshot = None
+        self._last_balance_ts = 0.0
+
+        return result
 
     def query_order(
         self,
@@ -246,4 +288,13 @@ class RoostooClient:
         else:
             raise ValueError("Send either order_id or pair")
 
-        return self._signed_post("/v3/cancel_order", payload)
+        result = self._signed_post("/v3/cancel_order", payload)
+
+        # Pending orders / balances may have changed, so clear cache.
+        self._last_balance_snapshot = None
+        self._last_balance_ts = 0.0
+
+        return result
+
+    def close(self) -> None:
+        self.session.close()
