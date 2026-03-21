@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-
+from bot.config import settings
 
 def generate_vwap_signal(
     df: pd.DataFrame,
