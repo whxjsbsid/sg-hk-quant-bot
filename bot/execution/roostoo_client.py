@@ -140,11 +140,28 @@ class RoostooClient:
         params = {"timestamp": self._timestamp_ms()}
         return self._signed_get("/v3/balance", params)
 
-    def get_free_balance(self, coin: str) -> float:
-        data = self.get_balance()
-        wallet = data.get("Wallet", {})
-        coin_info = wallet.get(coin, {})
-        return float(coin_info.get("Free", 0))
+    def get_free_balance(self, asset: str) -> float:
+    asset = asset.upper()
+    balance = self.get_balance()
+
+    if not isinstance(balance, dict):
+        return 0.0
+
+    for wallet_name in ("SpotWallet", "MarginWallet"):
+        wallet = balance.get(wallet_name, {})
+        if not isinstance(wallet, dict):
+            continue
+
+        if asset in wallet:
+            asset_info = wallet.get(asset, {})
+            if isinstance(asset_info, dict):
+                return float(asset_info.get("Free", 0) or 0)
+
+        for coin, asset_info in wallet.items():
+            if str(coin).upper() == asset and isinstance(asset_info, dict):
+                return float(asset_info.get("Free", 0) or 0)
+
+    return 0.0
 
     def pending_count(self) -> Dict[str, Any]:
         params = {"timestamp": self._timestamp_ms()}
