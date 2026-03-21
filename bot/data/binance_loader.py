@@ -1,32 +1,84 @@
-import pandas as pd
+import re
 import requests
+import pandas as pd
 
-from bot.config import settings
+
+BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
+BINANCE_MAX_LIMIT = 1000
 
 
-BASE_URL = "https://api.binance.com"
+def interval_to_milliseconds(interval: str) -> int:
+    match = re.fullmatch(r"(\d+)([mhdwM])", interval)
+    if not match:
+        raise ValueError(f"Unsupported interval format: {interval}")
+
+    value = int(match.group(1))
+    unit = match.group(2)
+
+    unit_ms = {
+        "m": 60 * 1000,
+        "h": 60 * 60 * 1000,
+        "d": 24 * 60 * 60 * 1000,
+        "w": 7 * 24 * 60 * 60 * 1000,
+        "M": 30 * 24 * 60 * 60 * 1000,
+    }
+
+    return value * unit_ms[unit]
 
 
 def load_binance_klines(
-    symbol: str = settings.BINANCE_SYMBOL,
-    interval: str = settings.INTERVAL,
-    limit: int = settings.LIMIT,
+    symbol: str = "BTCUSDT",
+    interval: str = "1h",
+    limit: int = 500,
 ) -> pd.DataFrame:
-    limit = min(limit, 1000)
+    if limit <= 0:
+        raise ValueError("limit must be greater than 0")
 
-    url = f"{BASE_URL}/api/v3/klines"
-    params = {
-        "symbol": symbol.upper(),
-        "interval": interval,
-        "limit": limit,
-    }
+    all_rows = []
+    seen_open_times = set()
+    end_time = None
 
-    response = requests.get(url, params=params, timeout=15)
-    response.raise_for_status()
-    data = response.json()
+    while len(all_rows) < limit:
+        batch_limit = min(limit - len(all_rows), BINANCE_MAX_LIMIT)
 
-    if not data:
-        raise ValueError("No kline data returned from Binance")
+        params = {
+            "symbol": symbol,
+            "interval": interval,
+            "limit": batch_limit,
+        }
+
+        if end_time is not None:
+            params["endTime"] = end_time
+
+        response = requests.get(BINANCE_KLINES_URL, params=params, timeout=10)
+        response.raise_for_status()
+        rows = response.json()
+
+        if not rows:
+            break
+
+        new_rows = []
+        for row in rows:
+            open_time = row[0]
+            if open_time not in seen_open_times:
+                seen_open_times.add(open_time)
+                new_rows.append(row)
+
+        if not new_rows:
+            break
+
+        all_rows.extend(new_rows)
+
+        oldest_open_time = new_rows[0][0]
+        end_time = oldest_open_time - 1
+
+        if len(rows) < batch_limit:
+            break
+
+    if not all_rows:
+        raise ValueError("No kline data returned from Binance.")
+
+    all_rows = sorted(all_rows, key=lambda x: x[0])[-limit:]
 
     columns = [
         "open_time",
@@ -43,7 +95,7 @@ def load_binance_klines(
         "ignore",
     ]
 
-    df = pd.DataFrame(data, columns=columns)
+    df = pd.DataFrame(all_rows, columns=columns)
 
     numeric_cols = [
         "open",
@@ -55,10 +107,14 @@ def load_binance_klines(
         "taker_buy_base_asset_volume",
         "taker_buy_quote_asset_volume",
     ]
-    df[numeric_cols] = df[numeric_cols].astype(float)
-    df["number_of_trades"] = df["number_of_trades"].astype(int)
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    int_cols = ["number_of_trades"]
+    for col in int_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
 
     df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
     df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
 
-    return df.sort_values("open_time").reset_index(drop=True)
+    return df.reset_index(drop=True)
