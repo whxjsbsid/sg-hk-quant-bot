@@ -1,3 +1,4 @@
+import math
 import time
 from typing import Optional
 from dotenv import load_dotenv
@@ -39,6 +40,33 @@ def safe_float(value, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def get_min_qty() -> float:
+    return safe_float(getattr(settings, "MIN_QTY", 0.001), 0.001)
+
+
+def get_max_qty() -> float:
+    return safe_float(getattr(settings, "MAX_QTY", 10.0), 10.0)
+
+
+def get_qty_decimals() -> int:
+    return int(getattr(settings, "QTY_DECIMALS", 4))
+
+
+def get_target_alloc_pct() -> float:
+    return safe_float(getattr(settings, "TARGET_ALLOC_PCT", 0.20), 0.20)
+
+
+def get_sell_buffer_ratio() -> float:
+    return safe_float(getattr(settings, "SELL_BUFFER_RATIO", 0.999), 0.999)
+
+
+def round_down(value: float, decimals: int) -> float:
+    if decimals < 0:
+        decimals = 0
+    factor = 10 ** decimals
+    return math.floor(value * factor) / factor
 
 
 def find_first_value(obj, key_names: set):
@@ -259,12 +287,61 @@ def get_available_quote_balance(quote_coin: str, balances: dict) -> float:
     return free_quote
 
 
-def infer_position_from_base_balance(free_base: float, qty: float) -> int:
-    threshold = max(qty * HOLDING_THRESHOLD_RATIO, 1e-12)
+def get_total_equity(latest_price: float, balances: dict, quote_coin: str) -> float:
+    quote_value = get_available_quote_balance(quote_coin, balances)
+    base_value = safe_float(balances.get("free_base"), 0.0) * latest_price
+    return quote_value + base_value
+
+
+def compute_entry_qty(latest_price: float, balances: dict, quote_coin: str) -> float:
+    target_alloc_pct = get_target_alloc_pct()
+    min_qty = get_min_qty()
+    max_qty = get_max_qty()
+    qty_decimals = get_qty_decimals()
+
+    if latest_price <= 0:
+        return 0.0
+
+    total_equity = get_total_equity(latest_price, balances, quote_coin)
+    target_notional = total_equity * target_alloc_pct
+    raw_qty = target_notional / latest_price
+
+    qty = round_down(raw_qty, qty_decimals)
+
+    if max_qty > 0:
+        qty = min(qty, max_qty)
+
+    if qty < min_qty:
+        return 0.0
+
+    return qty
+
+
+def compute_exit_qty(balances: dict) -> float:
+    min_qty = get_min_qty()
+    max_qty = get_max_qty()
+    qty_decimals = get_qty_decimals()
+    sell_buffer_ratio = get_sell_buffer_ratio()
+
+    free_base = safe_float(balances.get("free_base"), 0.0)
+    raw_qty = free_base * sell_buffer_ratio
+    qty = round_down(raw_qty, qty_decimals)
+
+    if max_qty > 0:
+        qty = min(qty, max_qty)
+
+    if qty < min_qty:
+        return 0.0
+
+    return qty
+
+
+def infer_position_from_base_balance(free_base: float) -> int:
+    threshold = max(get_min_qty() * HOLDING_THRESHOLD_RATIO, 1e-12)
     return 1 if free_base >= threshold else 0
 
 
-def infer_position(qty: float, base_coin: str, quote_coin: str) -> int:
+def infer_position(base_coin: str, quote_coin: str) -> int:
     balances = log_balances(
         base_coin,
         quote_coin,
@@ -272,7 +349,7 @@ def infer_position(qty: float, base_coin: str, quote_coin: str) -> int:
         force_refresh=True,
     )
     require_balance_snapshot(balances, "initial position check")
-    return infer_position_from_base_balance(balances["free_base"], qty)
+    return infer_position_from_base_balance(balances["free_base"])
 
 
 def query_order_safely(pair: str, order_id: str = ""):
@@ -306,13 +383,12 @@ def run_once():
     lower_std_mult = getattr(settings, "LOWER_STD_MULT", 0.75)
     strong_exit_std_mult = getattr(settings, "STRONG_EXIT_STD_MULT", 2.0)
     trend_window = getattr(settings, "TREND_WINDOW", 100)
-    qty = safe_float(getattr(settings, "QTY", 0.01), 0.01)
 
     base_coin, quote_coin = parse_pair(pair)
 
     try:
         if CURRENT_POSITION is None:
-            CURRENT_POSITION = infer_position(qty, base_coin, quote_coin)
+            CURRENT_POSITION = infer_position(base_coin, quote_coin)
             print("Initial CURRENT_POSITION =", CURRENT_POSITION)
             activity_logger.info(
                 "Initial CURRENT_POSITION = {0}".format(CURRENT_POSITION)
@@ -407,6 +483,7 @@ def run_once():
 
         side = None
         signal_reason = None
+        trade_qty = 0.0
 
         if CURRENT_POSITION == 0 and prev_signal == 0 and latest_signal == 1:
             balances = log_balances(
@@ -417,20 +494,29 @@ def run_once():
             )
             require_balance_snapshot(balances, "BUY balance check")
 
-            available_quote = get_available_quote_balance(quote_coin, balances)
-            estimated_cost = qty * latest_close * BUY_BUFFER_RATIO
+            if latest_close <= 0:
+                msg = "Skip BUY: invalid latest close price."
+                print(msg)
+                activity_logger.info(msg)
+                LAST_PROCESSED_CANDLE = candle_time
+                return
 
+            available_quote = get_available_quote_balance(quote_coin, balances)
+            trade_qty = compute_entry_qty(latest_close, balances, quote_coin)
+            estimated_cost = trade_qty * latest_close * BUY_BUFFER_RATIO
+
+            print("Computed BUY qty:", trade_qty)
             print("Estimated BUY cost:", estimated_cost)
             print("Available quote balance:", available_quote)
 
             activity_logger.info(
-                "BUY balance check: estimated_cost={0}, available_quote={1}".format(
-                    estimated_cost, available_quote
+                "BUY sizing: order_qty={0}, estimated_cost={1}, available_quote={2}".format(
+                    trade_qty, estimated_cost, available_quote
                 )
             )
 
-            if latest_close <= 0:
-                msg = "Skip BUY: invalid latest close price."
+            if trade_qty <= 0:
+                msg = "Skip BUY: computed order quantity is too small."
                 print(msg)
                 activity_logger.info(msg)
                 LAST_PROCESSED_CANDLE = candle_time
@@ -460,11 +546,19 @@ def run_once():
             require_balance_snapshot(balances, "SELL balance check")
 
             free_base = balances["free_base"]
+            trade_qty = compute_exit_qty(balances)
 
-            if free_base < qty * HOLDING_THRESHOLD_RATIO:
-                msg = "Skip SELL: only {0} {1} available, need about {2}".format(
-                    free_base, base_coin, qty
+            print("Computed SELL qty:", trade_qty)
+            print("Free base balance:", free_base)
+
+            activity_logger.info(
+                "SELL sizing: order_qty={0}, free_base={1}".format(
+                    trade_qty, free_base
                 )
+            )
+
+            if trade_qty <= 0:
+                msg = "Skip SELL: computed exit quantity is too small."
                 print(msg)
                 activity_logger.info(msg)
                 LAST_PROCESSED_CANDLE = candle_time
@@ -489,14 +583,14 @@ def run_once():
         print("\nPlacing {0} order...".format(side))
         activity_logger.info(
             "Placing {0} order for pair={1}, quantity={2}, reason={3}".format(
-                side, pair, qty, signal_reason
+                side, pair, trade_qty, signal_reason
             )
         )
 
         order_response = client.place_order(
             pair=pair,
             side=side,
-            quantity=qty,
+            quantity=trade_qty,
             order_type="MARKET",
         )
 
@@ -515,7 +609,7 @@ def run_once():
         require_balance_snapshot(post_trade_balances, "post-trade balance check")
 
         position_after_trade = infer_position_from_base_balance(
-            post_trade_balances["free_base"], qty
+            post_trade_balances["free_base"]
         )
 
         explicit_failure = has_explicit_failure(order_response) or has_explicit_failure(
@@ -550,7 +644,7 @@ def run_once():
                 symbol=symbol,
                 side=side,
                 price=actual_trade_price if actual_trade_price is not None else latest_close,
-                quantity=qty,
+                quantity=trade_qty,
                 order_id=str(order_id),
                 api_response=order_response,
                 pnl=None,
@@ -563,6 +657,7 @@ def run_once():
                     "latest_signal": latest_signal,
                     "current_position_before_trade": position_before_trade,
                     "current_position_after_trade": CURRENT_POSITION,
+                    "trade_qty": trade_qty,
                     "vwap": float(latest_row["vwap"]),
                     "lower_band": float(latest_row["lower_band"]),
                     "strong_upper_band": float(latest_row["strong_upper_band"]),
@@ -572,7 +667,7 @@ def run_once():
             activity_logger.info(
                 "Placed {0} order for {1} {2}. order_id={3}, fill_price={4}, reason={5}, CURRENT_POSITION={6}, LAST_PROCESSED_CANDLE={7}".format(
                     side,
-                    qty,
+                    trade_qty,
                     pair,
                     order_id,
                     actual_trade_price,
