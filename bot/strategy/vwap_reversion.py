@@ -5,8 +5,8 @@ import numpy as np
 def generate_vwap_signal(
     df: pd.DataFrame,
     window: int = 20,
-    lower_std_mult: float = 0.75,
-    strong_exit_std_mult: float = 2.0,
+    lower_std_mult: float = settings.LOWER_STD_MULT,
+    strong_exit_std_mult: float = settings.STRONG_EXIT_STD_MULT,
     trend_window: int = 100,
 ) -> pd.DataFrame:
     df = df.copy()
