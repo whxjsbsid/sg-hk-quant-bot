@@ -3,6 +3,7 @@ import numpy as np
 
 from bot.data.binance_loader import load_binance_klines
 from bot.strategy.vwap_reversion import generate_vwap_signal
+from bot.config import settings
 
 
 def get_periods_per_year(interval: str) -> int:
@@ -100,18 +101,29 @@ def compute_trade_stats(df: pd.DataFrame) -> dict:
         "active_days": active_days,
         "orders_per_day_all": orders_per_day_all,
         "orders_per_active_day": orders_per_active_day,
+        "sample_days": sample_days,
     }
 
 
 def backtest_vwap_strategy(
-    symbol: str = "BTCUSDT",
-    interval: str = "1h",
-    limit: int = 1000,
-    window: int = 20,
-    initial_cash: float = 10000,
+    symbol: str,
+    interval: str,
+    limit: int,
+    window: int,
+    initial_cash: float,
+    lower_std_mult: float,
+    strong_exit_std_mult: float,
+    trend_window: int,
 ) -> pd.DataFrame:
     df = load_binance_klines(symbol=symbol, interval=interval, limit=limit)
-    df = generate_vwap_signal(df, window=window)
+
+    df = generate_vwap_signal(
+        df,
+        window=window,
+        lower_std_mult=lower_std_mult,
+        strong_exit_std_mult=strong_exit_std_mult,
+        trend_window=trend_window,
+    )
 
     df["position"] = df["signal"].shift(1).fillna(0).astype(int)
     df["return"] = df["close"].pct_change().fillna(0)
@@ -138,51 +150,53 @@ def backtest_vwap_strategy(
 
     trade_stats = compute_trade_stats(df)
 
-    print(f"Strategy total return: {strategy_total_return:.2%}")
-    print(f"Buy and hold return:   {bh_total_return:.2%}")
+    print(f"Backtest interval:      {interval}")
+    print(f"Bars loaded:            {len(df)}")
+    print(f"Sample days:            {trade_stats['sample_days']:.2f}")
+    print()
+    print(f"Strategy total return:  {strategy_total_return:.2%}")
+    print(f"Buy and hold return:    {bh_total_return:.2%}")
     print()
 
     print("Trade frequency")
-    print(f"Entries:               {trade_stats['entries']}")
-    print(f"Exits:                 {trade_stats['exits']}")
-    print(f"Total orders:          {trade_stats['total_orders']}")
-    print(f"Completed round trips: {trade_stats['round_trips']}")
-    print(f"Active trading days:   {trade_stats['active_days']}")
-    print(f"Orders / day:          {trade_stats['orders_per_day_all']:.2f}")
-    print(f"Orders / active day:   {trade_stats['orders_per_active_day']:.2f}")
+    print(f"Entries:                {trade_stats['entries']}")
+    print(f"Exits:                  {trade_stats['exits']}")
+    print(f"Total orders:           {trade_stats['total_orders']}")
+    print(f"Completed round trips:  {trade_stats['round_trips']}")
+    print(f"Active trading days:    {trade_stats['active_days']}")
+    print(f"Orders / day:           {trade_stats['orders_per_day_all']:.2f}")
+    print(f"Orders / active day:    {trade_stats['orders_per_active_day']:.2f}")
     print()
 
     print("Strategy metrics")
-    print(f"Sharpe Ratio:    {strategy_metrics['sharpe']:.4f}")
-    print(f"Sortino Ratio:   {strategy_metrics['sortino']:.4f}")
-    print(f"Calmar Ratio:    {strategy_metrics['calmar']:.4f}")
-    print(f"Composite Score: {strategy_metrics['composite']:.4f}")
-    print(f"Max Drawdown:    {strategy_metrics['max_drawdown']:.2%}")
-    print(f"Annual Return:   {strategy_metrics['annual_return']:.2%}")
+    print(f"Sharpe Ratio:           {strategy_metrics['sharpe']:.4f}")
+    print(f"Sortino Ratio:          {strategy_metrics['sortino']:.4f}")
+    print(f"Calmar Ratio:           {strategy_metrics['calmar']:.4f}")
+    print(f"Composite Score:        {strategy_metrics['composite']:.4f}")
+    print(f"Max Drawdown:           {strategy_metrics['max_drawdown']:.2%}")
+    print(f"Annual Return:          {strategy_metrics['annual_return']:.2%}")
     print()
 
     print("Buy-and-hold metrics")
-    print(f"Sharpe Ratio:    {bh_metrics['sharpe']:.4f}")
-    print(f"Sortino Ratio:   {bh_metrics['sortino']:.4f}")
-    print(f"Calmar Ratio:    {bh_metrics['calmar']:.4f}")
-    print(f"Composite Score: {bh_metrics['composite']:.4f}")
-    print(f"Max Drawdown:    {bh_metrics['max_drawdown']:.2%}")
-    print(f"Annual Return:   {bh_metrics['annual_return']:.2%}")
+    print(f"Sharpe Ratio:           {bh_metrics['sharpe']:.4f}")
+    print(f"Sortino Ratio:          {bh_metrics['sortino']:.4f}")
+    print(f"Calmar Ratio:           {bh_metrics['calmar']:.4f}")
+    print(f"Composite Score:        {bh_metrics['composite']:.4f}")
+    print(f"Max Drawdown:           {bh_metrics['max_drawdown']:.2%}")
+    print(f"Annual Return:          {bh_metrics['annual_return']:.2%}")
     print()
-
-    print(df[[
-        "open_time", "close", "vwap", "std",
-        "lower_band", "strong_upper_band", "signal",
-        "position", "strategy_equity"
-    ]].tail(10))
 
     return df
 
 
 if __name__ == "__main__":
     df_result = backtest_vwap_strategy(
-        symbol="BTCUSDT",
-        interval="1h",
-        limit=1000,
-        window=20,
+        symbol=settings.BINANCE_SYMBOL,
+        interval=settings.INTERVAL,
+        limit=settings.LIMIT,
+        window=settings.VWAP_WINDOW,
+        initial_cash=settings.INITIAL_CASH,
+        lower_std_mult=settings.LOWER_STD_MULT,
+        strong_exit_std_mult=settings.STRONG_EXIT_STD_MULT,
+        trend_window=settings.TREND_WINDOW,
     )
