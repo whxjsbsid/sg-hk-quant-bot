@@ -39,9 +39,9 @@ def run_once():
     print("Entered run_once")
 
     symbol = getattr(settings, "BINANCE_SYMBOL", "BTCUSDT")
-    pair = getattr(settings, "ROOSTOO_PAIR", getattr(settings, "SYMBOL", "BTC/USD"))
+    pair = getattr(settings, "ROOSTOO_PAIR", "BTC/USD")
     interval = getattr(settings, "INTERVAL", "15m")
-    limit = getattr(settings, "LIMIT", 1000)
+    limit = getattr(settings, "LIMIT", 3000)
     vwap_window = getattr(settings, "VWAP_WINDOW", 20)
     lower_std_mult = getattr(settings, "LOWER_STD_MULT", 0.75)
     strong_exit_std_mult = getattr(settings, "STRONG_EXIT_STD_MULT", 2.0)
@@ -108,7 +108,6 @@ def run_once():
         print("\nLatest rows:")
         print(df[required_cols].tail(5))
 
-        # Use only closed candles
         prev_row = df.iloc[-3]
         latest_row = df.iloc[-2]
 
@@ -151,10 +150,7 @@ def run_once():
             activity_logger.info(f"Free {base_coin} balance before SELL: {free_balance}")
 
             if free_balance < qty:
-                msg = (
-                    f"Skip SELL: only {free_balance} {base_coin} available, "
-                    f"need {qty}"
-                )
+                msg = f"Skip SELL: only {free_balance} {base_coin} available, need {qty}"
                 print(msg)
                 activity_logger.info(msg)
                 LAST_PROCESSED_CANDLE = candle_time
