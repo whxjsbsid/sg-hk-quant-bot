@@ -20,10 +20,7 @@ activity_logger = setup_activity_logger()
 LAST_PROCESSED_CANDLE = None
 CURRENT_POSITION = None  # 0 = flat, 1 = long
 
-# Helps avoid edge cases from tiny balance dust / fees
 HOLDING_THRESHOLD_RATIO = 0.80
-
-# Small buffer so BUY is not attempted with just-barely-enough quote balance
 BUY_BUFFER_RATIO = 1.01
 
 
@@ -183,13 +180,18 @@ def has_explicit_success(obj) -> bool:
     return False
 
 
-def log_balances(base_coin: str, quote_coin: str, prefix: str = "") -> dict:
+def log_balances(
+    base_coin: str,
+    quote_coin: str,
+    prefix: str = "",
+    force_refresh: bool = False,
+) -> dict:
     try:
-        full_balance = client.get_balance()
-        free_base = safe_float(client.get_free_balance(base_coin))
-        free_quote = safe_float(client.get_free_balance(quote_coin))
-        free_usd = safe_float(client.get_free_balance("USD"))
-        free_usdt = safe_float(client.get_free_balance("USDT"))
+        full_balance = client.get_balance(force_refresh=force_refresh)
+        free_base = safe_float(client.get_free_balance(base_coin, balance_snapshot=full_balance))
+        free_quote = safe_float(client.get_free_balance(quote_coin, balance_snapshot=full_balance))
+        free_usd = safe_float(client.get_free_balance("USD", balance_snapshot=full_balance))
+        free_usdt = safe_float(client.get_free_balance("USDT", balance_snapshot=full_balance))
 
         if prefix:
             print(prefix)
@@ -247,7 +249,12 @@ def infer_position_from_base_balance(free_base: float, qty: float) -> int:
 
 
 def infer_position(qty: float, base_coin: str, quote_coin: str) -> int:
-    balances = log_balances(base_coin, quote_coin, prefix="Checking balances for initial position...")
+    balances = log_balances(
+        base_coin,
+        quote_coin,
+        prefix="Checking balances for initial position...",
+        force_refresh=True,
+    )
     return infer_position_from_base_balance(balances["free_base"], qty)
 
 
@@ -379,7 +386,12 @@ def run_once():
         signal_reason = None
 
         if CURRENT_POSITION == 0 and prev_signal == 0 and latest_signal == 1:
-            balances = log_balances(base_coin, quote_coin, prefix="Checking balances before BUY...")
+            balances = log_balances(
+                base_coin,
+                quote_coin,
+                prefix="Checking balances before BUY...",
+                force_refresh=True,
+            )
             available_quote = get_available_quote_balance(quote_coin, balances)
             estimated_cost = qty * latest_close * BUY_BUFFER_RATIO
 
@@ -411,7 +423,12 @@ def run_once():
             signal_reason = "Signal flipped from 0 to 1 on latest closed candle"
 
         elif CURRENT_POSITION == 1 and prev_signal == 1 and latest_signal == 0:
-            balances = log_balances(base_coin, quote_coin, prefix="Checking balances before SELL...")
+            balances = log_balances(
+                base_coin,
+                quote_coin,
+                prefix="Checking balances before SELL...",
+                force_refresh=True,
+            )
             free_base = balances["free_base"]
 
             if free_base < qty * HOLDING_THRESHOLD_RATIO:
@@ -455,7 +472,12 @@ def run_once():
         order_id = extract_order_id(order_response)
         order_query = query_order_safely(pair=pair, order_id=order_id)
 
-        post_trade_balances = log_balances(base_coin, quote_coin, prefix="Balances after order:")
+        post_trade_balances = log_balances(
+            base_coin,
+            quote_coin,
+            prefix="Balances after order:",
+            force_refresh=True,
+        )
         position_after_trade = infer_position_from_base_balance(post_trade_balances["free_base"], qty)
 
         explicit_failure = has_explicit_failure(order_response) or has_explicit_failure(order_query)
