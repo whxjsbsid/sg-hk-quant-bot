@@ -21,16 +21,56 @@ LAST_PROCESSED_CANDLE = None
 CURRENT_POSITION = None  # 0 = flat, 1 = long
 
 
-def infer_position(qty: float, base_coin: str) -> int:
+def parse_pair(pair: str) -> tuple[str, str]:
+    if "/" in pair:
+        base_coin, quote_coin = pair.split("/", 1)
+        return base_coin.strip().upper(), quote_coin.strip().upper()
+    return "BTC", "USD"
+
+
+def log_balances(base_coin: str, quote_coin: str, prefix: str = "") -> dict:
     try:
-        free_balance = client.get_free_balance(base_coin)
-        print(f"Free {base_coin} balance:", free_balance)
-        activity_logger.info(f"Free {base_coin} balance: {free_balance}")
-        return 1 if free_balance >= qty else 0
+        full_balance = client.get_balance()
+        free_base = client.get_free_balance(base_coin)
+        free_quote = client.get_free_balance(quote_coin)
+        free_usdt = client.get_free_balance("USDT")
+
+        if prefix:
+            print(prefix)
+            activity_logger.info(prefix)
+
+        print("Full balance:")
+        print(full_balance)
+        print(f"Free {base_coin} balance:", free_base)
+        print(f"Free {quote_coin} balance:", free_quote)
+        print("Free USDT balance:", free_usdt)
+
+        activity_logger.info(f"Full balance: {full_balance}")
+        activity_logger.info(f"Free {base_coin} balance: {free_base}")
+        activity_logger.info(f"Free {quote_coin} balance: {free_quote}")
+        activity_logger.info(f"Free USDT balance: {free_usdt}")
+
+        return {
+            "full_balance": full_balance,
+            "free_base": free_base,
+            "free_quote": free_quote,
+            "free_usdt": free_usdt,
+        }
     except Exception as e:
-        print("Failed to infer position from balance:", e)
-        activity_logger.exception("Failed to infer position from balance")
-        return 0
+        print("Failed to fetch balances:", e)
+        activity_logger.exception("Failed to fetch balances")
+        return {
+            "full_balance": None,
+            "free_base": 0.0,
+            "free_quote": 0.0,
+            "free_usdt": 0.0,
+        }
+
+
+def infer_position(qty: float, base_coin: str, quote_coin: str) -> int:
+    balances = log_balances(base_coin, quote_coin, prefix="Checking balances for initial position...")
+    free_base = balances["free_base"]
+    return 1 if free_base >= qty else 0
 
 
 def run_once():
@@ -47,11 +87,12 @@ def run_once():
     strong_exit_std_mult = getattr(settings, "STRONG_EXIT_STD_MULT", 2.0)
     trend_window = getattr(settings, "TREND_WINDOW", 100)
     qty = getattr(settings, "QTY", 0.01)
-    base_coin = getattr(settings, "BASE_COIN", "BTC")
+
+    base_coin, quote_coin = parse_pair(pair)
 
     try:
         if CURRENT_POSITION is None:
-            CURRENT_POSITION = infer_position(qty, base_coin)
+            CURRENT_POSITION = infer_position(qty, base_coin, quote_coin)
             print("Initial CURRENT_POSITION =", CURRENT_POSITION)
             activity_logger.info(f"Initial CURRENT_POSITION = {CURRENT_POSITION}")
 
@@ -141,16 +182,23 @@ def run_once():
         signal_reason = None
 
         if CURRENT_POSITION == 0 and prev_signal == 0 and latest_signal == 1:
+            balances = log_balances(base_coin, quote_coin, prefix="Checking balances before BUY...")
+            if balances["free_quote"] <= 0 and balances["free_usdt"] <= 0:
+                msg = f"Skip BUY: no available {quote_coin} or USDT balance."
+                print(msg)
+                activity_logger.info(msg)
+                LAST_PROCESSED_CANDLE = candle_time
+                return
+
             side = "BUY"
             signal_reason = "Signal flipped from 0 to 1 on latest closed candle"
 
         elif CURRENT_POSITION == 1 and prev_signal == 1 and latest_signal == 0:
-            free_balance = client.get_free_balance(base_coin)
-            print(f"Free {base_coin} balance:", free_balance)
-            activity_logger.info(f"Free {base_coin} balance before SELL: {free_balance}")
+            balances = log_balances(base_coin, quote_coin, prefix="Checking balances before SELL...")
+            free_base = balances["free_base"]
 
-            if free_balance < qty:
-                msg = f"Skip SELL: only {free_balance} {base_coin} available, need {qty}"
+            if free_base < qty:
+                msg = f"Skip SELL: only {free_base} {base_coin} available, need {qty}"
                 print(msg)
                 activity_logger.info(msg)
                 LAST_PROCESSED_CANDLE = candle_time
@@ -194,8 +242,7 @@ def run_once():
             print("\nOrder ID not found in response. Falling back to pair query:")
             print(client.query_order(pair=pair, limit=5))
 
-        print("\nUpdated balance:")
-        print(client.get_balance())
+        log_balances(base_coin, quote_coin, prefix="Balances after order:")
 
         trade_logger.log_trade(
             symbol=symbol,
