@@ -7,6 +7,7 @@ def setup_activity_logger(log_path: str = "logs/bot.log") -> logging.Logger:
 
     logger = logging.getLogger("bot")
     logger.setLevel(logging.INFO)
+    logger.propagate = False
 
     if not logger.handlers:
         file_handler = logging.FileHandler(log_path, encoding="utf-8")
