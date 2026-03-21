@@ -25,7 +25,9 @@ class TradeLogger:
             "strategy_state",
         ]
 
-        if not self.file_path.exists():
+        needs_header = (not self.file_path.exists()) or self.file_path.stat().st_size == 0
+
+        if needs_header:
             with open(self.file_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=self.fieldnames)
                 writer.writeheader()
@@ -49,13 +51,21 @@ class TradeLogger:
             "side": side,
             "price": price,
             "quantity": quantity,
-            "order_id": order_id,
-            "api_response": json.dumps(api_response, ensure_ascii=False, default=str),
+            "order_id": str(order_id),
+            "api_response": json.dumps(
+                api_response,
+                ensure_ascii=False,
+                default=str,
+                separators=(",", ":"),
+            ),
             "pnl": pnl if pnl is not None else "",
             "signal_reason": signal_reason or "",
-            "strategy_state": json.dumps(strategy_state, ensure_ascii=False, default=str)
-            if strategy_state
-            else "",
+            "strategy_state": json.dumps(
+                strategy_state,
+                ensure_ascii=False,
+                default=str,
+                separators=(",", ":"),
+            ) if strategy_state else "",
         }
 
         with open(self.file_path, "a", newline="", encoding="utf-8") as f:
