@@ -25,7 +25,7 @@ HOLDING_THRESHOLD_RATIO = 0.80
 BUY_BUFFER_RATIO = 1.01
 
 
-def parse_pair(pair: str) -> tuple[str, str]:
+def parse_pair(pair: str) -> tuple:
     if "/" in pair:
         base_coin, quote_coin = pair.split("/", 1)
         return base_coin.strip().upper(), quote_coin.strip().upper()
@@ -41,7 +41,7 @@ def safe_float(value, default: float = 0.0) -> float:
         return default
 
 
-def find_first_value(obj, key_names: set[str]):
+def find_first_value(obj, key_names: set):
     if isinstance(obj, dict):
         for key, value in obj.items():
             if str(key).lower() in key_names and value not in (None, ""):
@@ -189,10 +189,18 @@ def log_balances(
 ) -> dict:
     try:
         full_balance = client.get_balance(force_refresh=force_refresh)
-        free_base = safe_float(client.get_free_balance(base_coin, balance_snapshot=full_balance))
-        free_quote = safe_float(client.get_free_balance(quote_coin, balance_snapshot=full_balance))
-        free_usd = safe_float(client.get_free_balance("USD", balance_snapshot=full_balance))
-        free_usdt = safe_float(client.get_free_balance("USDT", balance_snapshot=full_balance))
+        free_base = safe_float(
+            client.get_free_balance(base_coin, balance_snapshot=full_balance)
+        )
+        free_quote = safe_float(
+            client.get_free_balance(quote_coin, balance_snapshot=full_balance)
+        )
+        free_usd = safe_float(
+            client.get_free_balance("USD", balance_snapshot=full_balance)
+        )
+        free_usdt = safe_float(
+            client.get_free_balance("USDT", balance_snapshot=full_balance)
+        )
 
         if prefix:
             print(prefix)
@@ -200,16 +208,16 @@ def log_balances(
 
         print("Full balance:")
         print(full_balance)
-        print(f"Free {base_coin} balance:", free_base)
-        print(f"Free {quote_coin} balance:", free_quote)
+        print("Free {0} balance: {1}".format(base_coin, free_base))
+        print("Free {0} balance: {1}".format(quote_coin, free_quote))
         print("Free USD balance:", free_usd)
         print("Free USDT balance:", free_usdt)
 
-        activity_logger.info(f"Full balance: {full_balance}")
-        activity_logger.info(f"Free {base_coin} balance: {free_base}")
-        activity_logger.info(f"Free {quote_coin} balance: {free_quote}")
-        activity_logger.info(f"Free USD balance: {free_usd}")
-        activity_logger.info(f"Free USDT balance: {free_usdt}")
+        activity_logger.info("Full balance: {0}".format(full_balance))
+        activity_logger.info("Free {0} balance: {1}".format(base_coin, free_base))
+        activity_logger.info("Free {0} balance: {1}".format(quote_coin, free_quote))
+        activity_logger.info("Free USD balance: {0}".format(free_usd))
+        activity_logger.info("Free USDT balance: {0}".format(free_usdt))
 
         return {
             "full_balance": full_balance,
@@ -228,6 +236,13 @@ def log_balances(
             "free_usd": 0.0,
             "free_usdt": 0.0,
         }
+
+
+def require_balance_snapshot(balances: dict, context: str) -> None:
+    if balances.get("full_balance") is None:
+        raise RuntimeError(
+            "Failed to fetch balance during {0}. Check Roostoo API auth before running the bot.".format(context)
+        )
 
 
 def get_available_quote_balance(quote_coin: str, balances: dict) -> float:
@@ -256,6 +271,7 @@ def infer_position(qty: float, base_coin: str, quote_coin: str) -> int:
         prefix="Checking balances for initial position...",
         force_refresh=True,
     )
+    require_balance_snapshot(balances, "initial position check")
     return infer_position_from_base_balance(balances["free_base"], qty)
 
 
@@ -298,20 +314,26 @@ def run_once():
         if CURRENT_POSITION is None:
             CURRENT_POSITION = infer_position(qty, base_coin, quote_coin)
             print("Initial CURRENT_POSITION =", CURRENT_POSITION)
-            activity_logger.info(f"Initial CURRENT_POSITION = {CURRENT_POSITION}")
+            activity_logger.info(
+                "Initial CURRENT_POSITION = {0}".format(CURRENT_POSITION)
+            )
 
         print("Loading Binance data...")
         activity_logger.info(
-            f"Loading Binance data for symbol={symbol}, interval={interval}, limit={limit}"
+            "Loading Binance data for symbol={0}, interval={1}, limit={2}".format(
+                symbol, interval, limit
+            )
         )
         df = load_binance_klines(symbol=symbol, interval=interval, limit=limit)
 
         print("Generating signal...")
         activity_logger.info(
-            f"Generating VWAP signal with window={vwap_window}, "
-            f"lower_std_mult={lower_std_mult}, "
-            f"strong_exit_std_mult={strong_exit_std_mult}, "
-            f"trend_window={trend_window}"
+            "Generating VWAP signal with window={0}, lower_std_mult={1}, strong_exit_std_mult={2}, trend_window={3}".format(
+                vwap_window,
+                lower_std_mult,
+                strong_exit_std_mult,
+                trend_window,
+            )
         )
         df = generate_vwap_signal(
             df,
@@ -339,7 +361,7 @@ def run_once():
         ]
         missing_cols = [col for col in required_cols if col not in df.columns]
         if missing_cols:
-            msg = f"Missing required columns: {missing_cols}"
+            msg = "Missing required columns: {0}".format(missing_cols)
             print(msg)
             activity_logger.info(msg)
             return
@@ -361,7 +383,7 @@ def run_once():
         print("\nLatest closed candle_time =", candle_time)
 
         if LAST_PROCESSED_CANDLE == candle_time:
-            msg = f"Closed candle {candle_time} already processed. Skipping."
+            msg = "Closed candle {0} already processed. Skipping.".format(candle_time)
             print(msg)
             activity_logger.info(msg)
             return
@@ -393,6 +415,8 @@ def run_once():
                 prefix="Checking balances before BUY...",
                 force_refresh=True,
             )
+            require_balance_snapshot(balances, "BUY balance check")
+
             available_quote = get_available_quote_balance(quote_coin, balances)
             estimated_cost = qty * latest_close * BUY_BUFFER_RATIO
 
@@ -400,7 +424,9 @@ def run_once():
             print("Available quote balance:", available_quote)
 
             activity_logger.info(
-                f"BUY balance check: estimated_cost={estimated_cost}, available_quote={available_quote}"
+                "BUY balance check: estimated_cost={0}, available_quote={1}".format(
+                    estimated_cost, available_quote
+                )
             )
 
             if latest_close <= 0:
@@ -412,8 +438,9 @@ def run_once():
 
             if available_quote < estimated_cost:
                 msg = (
-                    f"Skip BUY: available quote balance {available_quote} is below "
-                    f"estimated cost {estimated_cost}"
+                    "Skip BUY: available quote balance {0} is below estimated cost {1}".format(
+                        available_quote, estimated_cost
+                    )
                 )
                 print(msg)
                 activity_logger.info(msg)
@@ -430,10 +457,14 @@ def run_once():
                 prefix="Checking balances before SELL...",
                 force_refresh=True,
             )
+            require_balance_snapshot(balances, "SELL balance check")
+
             free_base = balances["free_base"]
 
             if free_base < qty * HOLDING_THRESHOLD_RATIO:
-                msg = f"Skip SELL: only {free_base} {base_coin} available, need about {qty}"
+                msg = "Skip SELL: only {0} {1} available, need about {2}".format(
+                    free_base, base_coin, qty
+                )
                 print(msg)
                 activity_logger.info(msg)
                 LAST_PROCESSED_CANDLE = candle_time
@@ -444,9 +475,9 @@ def run_once():
 
         if side is None:
             msg = (
-                f"No trade signal on candle {candle_time}. "
-                f"prev_signal={prev_signal}, latest_signal={latest_signal}, "
-                f"CURRENT_POSITION={CURRENT_POSITION}"
+                "No trade signal on candle {0}. prev_signal={1}, latest_signal={2}, CURRENT_POSITION={3}".format(
+                    candle_time, prev_signal, latest_signal, CURRENT_POSITION
+                )
             )
             print(msg)
             activity_logger.info(msg)
@@ -455,9 +486,11 @@ def run_once():
 
         position_before_trade = CURRENT_POSITION
 
-        print(f"\nPlacing {side} order...")
+        print("\nPlacing {0} order...".format(side))
         activity_logger.info(
-            f"Placing {side} order for pair={pair}, quantity={qty}, reason={signal_reason}"
+            "Placing {0} order for pair={1}, quantity={2}, reason={3}".format(
+                side, pair, qty, signal_reason
+            )
         )
 
         order_response = client.place_order(
@@ -479,9 +512,15 @@ def run_once():
             prefix="Balances after order:",
             force_refresh=True,
         )
-        position_after_trade = infer_position_from_base_balance(post_trade_balances["free_base"], qty)
+        require_balance_snapshot(post_trade_balances, "post-trade balance check")
 
-        explicit_failure = has_explicit_failure(order_response) or has_explicit_failure(order_query)
+        position_after_trade = infer_position_from_base_balance(
+            post_trade_balances["free_base"], qty
+        )
+
+        explicit_failure = has_explicit_failure(order_response) or has_explicit_failure(
+            order_query
+        )
         explicit_success = (
             has_explicit_success(order_response)
             or has_explicit_success(order_query)
@@ -531,21 +570,29 @@ def run_once():
             )
 
             activity_logger.info(
-                f"Placed {side} order for {qty} {pair}. "
-                f"order_id={order_id}, fill_price={actual_trade_price}, "
-                f"reason={signal_reason}, "
-                f"CURRENT_POSITION={CURRENT_POSITION}, "
-                f"LAST_PROCESSED_CANDLE={LAST_PROCESSED_CANDLE}"
+                "Placed {0} order for {1} {2}. order_id={3}, fill_price={4}, reason={5}, CURRENT_POSITION={6}, LAST_PROCESSED_CANDLE={7}".format(
+                    side,
+                    qty,
+                    pair,
+                    order_id,
+                    actual_trade_price,
+                    signal_reason,
+                    CURRENT_POSITION,
+                    LAST_PROCESSED_CANDLE,
+                )
             )
 
             print("Updated CURRENT_POSITION =", CURRENT_POSITION)
         else:
             msg = (
-                f"Order may not have succeeded cleanly. "
-                f"side={side}, order_id={order_id}, "
-                f"explicit_failure={explicit_failure}, explicit_success={explicit_success}, "
-                f"position_before_trade={position_before_trade}, "
-                f"position_after_trade={CURRENT_POSITION}"
+                "Order may not have succeeded cleanly. side={0}, order_id={1}, explicit_failure={2}, explicit_success={3}, position_before_trade={4}, position_after_trade={5}".format(
+                    side,
+                    order_id,
+                    explicit_failure,
+                    explicit_success,
+                    position_before_trade,
+                    CURRENT_POSITION,
+                )
             )
             print(msg)
             activity_logger.warning(msg)
@@ -553,6 +600,7 @@ def run_once():
     except Exception as e:
         print("run_once failed:", e)
         activity_logger.exception("run_once failed")
+        raise
 
 
 if __name__ == "__main__":
@@ -563,6 +611,6 @@ if __name__ == "__main__":
 
     while True:
         run_once()
-        print(f"Sleeping for {poll_seconds} seconds...\n")
-        activity_logger.info(f"Sleeping for {poll_seconds} seconds")
+        print("Sleeping for {0} seconds...\n".format(poll_seconds))
+        activity_logger.info("Sleeping for {0} seconds".format(poll_seconds))
         time.sleep(poll_seconds)
