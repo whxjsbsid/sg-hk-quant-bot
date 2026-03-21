@@ -20,6 +20,12 @@ activity_logger = setup_activity_logger()
 LAST_PROCESSED_CANDLE = None
 CURRENT_POSITION = None  # 0 = flat, 1 = long
 
+# Helps avoid edge cases from tiny balance dust / fees
+HOLDING_THRESHOLD_RATIO = 0.80
+
+# Small buffer so BUY is not attempted with just-barely-enough quote balance
+BUY_BUFFER_RATIO = 1.01
+
 
 def parse_pair(pair: str) -> tuple[str, str]:
     if "/" in pair:
@@ -28,12 +34,162 @@ def parse_pair(pair: str) -> tuple[str, str]:
     return "BTC", "USD"
 
 
+def safe_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def find_first_value(obj, key_names: set[str]):
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if str(key).lower() in key_names and value not in (None, ""):
+                return value
+        for value in obj.values():
+            found = find_first_value(value, key_names)
+            if found not in (None, ""):
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = find_first_value(item, key_names)
+            if found not in (None, ""):
+                return found
+    return None
+
+
+def extract_order_id(obj) -> str:
+    value = find_first_value(
+        obj,
+        {
+            "orderid",
+            "order_id",
+            "id",
+        },
+    )
+    return str(value) if value not in (None, "") else ""
+
+
+def extract_order_status(obj) -> str:
+    value = find_first_value(
+        obj,
+        {
+            "status",
+            "orderstatus",
+            "state",
+            "order_state",
+        },
+    )
+    return str(value).strip().upper() if value not in (None, "") else ""
+
+
+def extract_fill_price(*objs, fallback: float | None = None) -> float | None:
+    price_keys = {
+        "avgprice",
+        "averageprice",
+        "avg_fill_price",
+        "fillprice",
+        "filledprice",
+        "executedprice",
+        "price",
+    }
+    for obj in objs:
+        value = find_first_value(obj, price_keys)
+        price = safe_float(value, default=0.0)
+        if price > 0:
+            return price
+    return fallback
+
+
+def has_explicit_failure(obj) -> bool:
+    if obj is None:
+        return False
+
+    status = extract_order_status(obj)
+    failure_statuses = {
+        "REJECTED",
+        "FAILED",
+        "CANCELLED",
+        "EXPIRED",
+        "ERROR",
+        "INVALID",
+    }
+    if status in failure_statuses:
+        return True
+
+    message_value = find_first_value(
+        obj,
+        {
+            "message",
+            "msg",
+            "error",
+            "errormsg",
+            "error_message",
+            "detail",
+        },
+    )
+    if message_value not in (None, ""):
+        message = str(message_value).lower()
+        failure_words = [
+            "reject",
+            "failed",
+            "error",
+            "insufficient",
+            "invalid",
+            "not enough",
+            "denied",
+            "cancel",
+            "expired",
+        ]
+        if any(word in message for word in failure_words):
+            return True
+
+    success_value = find_first_value(obj, {"success", "ok"})
+    if isinstance(success_value, bool) and success_value is False:
+        return True
+
+    return False
+
+
+def has_explicit_success(obj) -> bool:
+    if obj is None:
+        return False
+
+    status = extract_order_status(obj)
+    success_statuses = {
+        "FILLED",
+        "EXECUTED",
+        "COMPLETED",
+        "DONE",
+        "SUCCESS",
+        "CLOSED",
+        "OPEN",
+        "NEW",
+        "PARTIALLY_FILLED",
+        "PARTIAL",
+    }
+    if status in success_statuses:
+        return True
+
+    success_value = find_first_value(obj, {"success", "ok"})
+    if isinstance(success_value, bool) and success_value is True:
+        return True
+
+    if extract_order_id(obj):
+        return True
+
+    return False
+
+
 def log_balances(base_coin: str, quote_coin: str, prefix: str = "") -> dict:
     try:
         full_balance = client.get_balance()
-        free_base = client.get_free_balance(base_coin)
-        free_quote = client.get_free_balance(quote_coin)
-        free_usdt = client.get_free_balance("USDT")
+        free_base = safe_float(client.get_free_balance(base_coin))
+        free_quote = safe_float(client.get_free_balance(quote_coin))
+        free_usd = safe_float(client.get_free_balance("USD"))
+        free_usdt = safe_float(client.get_free_balance("USDT"))
 
         if prefix:
             print(prefix)
@@ -43,17 +199,20 @@ def log_balances(base_coin: str, quote_coin: str, prefix: str = "") -> dict:
         print(full_balance)
         print(f"Free {base_coin} balance:", free_base)
         print(f"Free {quote_coin} balance:", free_quote)
+        print("Free USD balance:", free_usd)
         print("Free USDT balance:", free_usdt)
 
         activity_logger.info(f"Full balance: {full_balance}")
         activity_logger.info(f"Free {base_coin} balance: {free_base}")
         activity_logger.info(f"Free {quote_coin} balance: {free_quote}")
+        activity_logger.info(f"Free USD balance: {free_usd}")
         activity_logger.info(f"Free USDT balance: {free_usdt}")
 
         return {
             "full_balance": full_balance,
             "free_base": free_base,
             "free_quote": free_quote,
+            "free_usd": free_usd,
             "free_usdt": free_usdt,
         }
     except Exception as e:
@@ -63,14 +222,51 @@ def log_balances(base_coin: str, quote_coin: str, prefix: str = "") -> dict:
             "full_balance": None,
             "free_base": 0.0,
             "free_quote": 0.0,
+            "free_usd": 0.0,
             "free_usdt": 0.0,
         }
 
 
+def get_available_quote_balance(quote_coin: str, balances: dict) -> float:
+    free_quote = safe_float(balances.get("free_quote"), 0.0)
+    free_usd = safe_float(balances.get("free_usd"), 0.0)
+    free_usdt = safe_float(balances.get("free_usdt"), 0.0)
+
+    if quote_coin == "USD":
+        return max(free_quote, free_usd) + free_usdt
+
+    if quote_coin == "USDT":
+        return max(free_quote, free_usdt)
+
+    return free_quote
+
+
+def infer_position_from_base_balance(free_base: float, qty: float) -> int:
+    threshold = max(qty * HOLDING_THRESHOLD_RATIO, 1e-12)
+    return 1 if free_base >= threshold else 0
+
+
 def infer_position(qty: float, base_coin: str, quote_coin: str) -> int:
     balances = log_balances(base_coin, quote_coin, prefix="Checking balances for initial position...")
-    free_base = balances["free_base"]
-    return 1 if free_base >= qty else 0
+    return infer_position_from_base_balance(balances["free_base"], qty)
+
+
+def query_order_safely(pair: str, order_id: str = ""):
+    try:
+        if order_id:
+            result = client.query_order(order_id=order_id)
+            print("\nOrder query by ID:")
+            print(result)
+            return result
+
+        result = client.query_order(pair=pair, limit=5)
+        print("\nOrder ID not found in response. Falling back to pair query:")
+        print(result)
+        return result
+    except Exception as e:
+        print("Order query failed:", e)
+        activity_logger.exception("Order query failed")
+        return None
 
 
 def run_once():
@@ -86,7 +282,7 @@ def run_once():
     lower_std_mult = getattr(settings, "LOWER_STD_MULT", 0.75)
     strong_exit_std_mult = getattr(settings, "STRONG_EXIT_STD_MULT", 2.0)
     trend_window = getattr(settings, "TREND_WINDOW", 100)
-    qty = getattr(settings, "QTY", 0.01)
+    qty = safe_float(getattr(settings, "QTY", 0.01), 0.01)
 
     base_coin, quote_coin = parse_pair(pair)
 
@@ -152,6 +348,7 @@ def run_once():
         prev_row = df.iloc[-3]
         latest_row = df.iloc[-2]
 
+        latest_close = safe_float(latest_row["close"], 0.0)
         candle_time = str(latest_row["close_time"])
         print("\nLatest closed candle_time =", candle_time)
 
@@ -183,8 +380,28 @@ def run_once():
 
         if CURRENT_POSITION == 0 and prev_signal == 0 and latest_signal == 1:
             balances = log_balances(base_coin, quote_coin, prefix="Checking balances before BUY...")
-            if balances["free_quote"] <= 0 and balances["free_usdt"] <= 0:
-                msg = f"Skip BUY: no available {quote_coin} or USDT balance."
+            available_quote = get_available_quote_balance(quote_coin, balances)
+            estimated_cost = qty * latest_close * BUY_BUFFER_RATIO
+
+            print("Estimated BUY cost:", estimated_cost)
+            print("Available quote balance:", available_quote)
+
+            activity_logger.info(
+                f"BUY balance check: estimated_cost={estimated_cost}, available_quote={available_quote}"
+            )
+
+            if latest_close <= 0:
+                msg = "Skip BUY: invalid latest close price."
+                print(msg)
+                activity_logger.info(msg)
+                LAST_PROCESSED_CANDLE = candle_time
+                return
+
+            if available_quote < estimated_cost:
+                msg = (
+                    f"Skip BUY: available quote balance {available_quote} is below "
+                    f"estimated cost {estimated_cost}"
+                )
                 print(msg)
                 activity_logger.info(msg)
                 LAST_PROCESSED_CANDLE = candle_time
@@ -197,8 +414,8 @@ def run_once():
             balances = log_balances(base_coin, quote_coin, prefix="Checking balances before SELL...")
             free_base = balances["free_base"]
 
-            if free_base < qty:
-                msg = f"Skip SELL: only {free_base} {base_coin} available, need {qty}"
+            if free_base < qty * HOLDING_THRESHOLD_RATIO:
+                msg = f"Skip SELL: only {free_base} {base_coin} available, need about {qty}"
                 print(msg)
                 activity_logger.info(msg)
                 LAST_PROCESSED_CANDLE = candle_time
@@ -218,6 +435,8 @@ def run_once():
             LAST_PROCESSED_CANDLE = candle_time
             return
 
+        position_before_trade = CURRENT_POSITION
+
         print(f"\nPlacing {side} order...")
         activity_logger.info(
             f"Placing {side} order for pair={pair}, quantity={qty}, reason={signal_reason}"
@@ -233,55 +452,80 @@ def run_once():
         print("Order response:")
         print(order_response)
 
-        order_id = order_response.get("OrderDetail", {}).get("OrderID", "")
+        order_id = extract_order_id(order_response)
+        order_query = query_order_safely(pair=pair, order_id=order_id)
 
-        if order_id:
-            print("\nOrder query by ID:")
-            print(client.query_order(order_id=order_id))
-        else:
-            print("\nOrder ID not found in response. Falling back to pair query:")
-            print(client.query_order(pair=pair, limit=5))
+        post_trade_balances = log_balances(base_coin, quote_coin, prefix="Balances after order:")
+        position_after_trade = infer_position_from_base_balance(post_trade_balances["free_base"], qty)
 
-        log_balances(base_coin, quote_coin, prefix="Balances after order:")
-
-        trade_logger.log_trade(
-            symbol=symbol,
-            side=side,
-            price=float(latest_row["close"]),
-            quantity=qty,
-            order_id=str(order_id),
-            api_response=order_response,
-            pnl=None,
-            signal_reason=signal_reason,
-            strategy_state={
-                "pair": pair,
-                "interval": interval,
-                "candle_time": candle_time,
-                "prev_signal": prev_signal,
-                "latest_signal": latest_signal,
-                "current_position_before_trade": CURRENT_POSITION,
-                "vwap": float(latest_row["vwap"]),
-                "lower_band": float(latest_row["lower_band"]),
-                "strong_upper_band": float(latest_row["strong_upper_band"]),
-            },
+        explicit_failure = has_explicit_failure(order_response) or has_explicit_failure(order_query)
+        explicit_success = (
+            has_explicit_success(order_response)
+            or has_explicit_success(order_query)
+            or bool(order_id)
         )
 
-        activity_logger.info(
-            f"Placed {side} order for {qty} {pair}. "
-            f"order_id={order_id}, reason={signal_reason}"
+        expected_position = 1 if side == "BUY" else 0
+        balance_confirms_trade = position_after_trade == expected_position
+
+        order_success = False
+        if balance_confirms_trade:
+            order_success = True
+        elif explicit_success and not explicit_failure:
+            order_success = True
+
+        actual_trade_price = extract_fill_price(
+            order_query,
+            order_response,
+            fallback=latest_close if latest_close > 0 else None,
         )
 
-        if side == "BUY":
-            CURRENT_POSITION = 1
-        elif side == "SELL":
-            CURRENT_POSITION = 0
-
+        CURRENT_POSITION = position_after_trade
         LAST_PROCESSED_CANDLE = candle_time
-        print("Updated CURRENT_POSITION =", CURRENT_POSITION)
-        activity_logger.info(
-            f"Updated CURRENT_POSITION = {CURRENT_POSITION}; "
-            f"LAST_PROCESSED_CANDLE = {LAST_PROCESSED_CANDLE}"
-        )
+
+        if order_success:
+            trade_logger.log_trade(
+                symbol=symbol,
+                side=side,
+                price=actual_trade_price if actual_trade_price is not None else latest_close,
+                quantity=qty,
+                order_id=str(order_id),
+                api_response=order_response,
+                pnl=None,
+                signal_reason=signal_reason,
+                strategy_state={
+                    "pair": pair,
+                    "interval": interval,
+                    "candle_time": candle_time,
+                    "prev_signal": prev_signal,
+                    "latest_signal": latest_signal,
+                    "current_position_before_trade": position_before_trade,
+                    "current_position_after_trade": CURRENT_POSITION,
+                    "vwap": float(latest_row["vwap"]),
+                    "lower_band": float(latest_row["lower_band"]),
+                    "strong_upper_band": float(latest_row["strong_upper_band"]),
+                },
+            )
+
+            activity_logger.info(
+                f"Placed {side} order for {qty} {pair}. "
+                f"order_id={order_id}, fill_price={actual_trade_price}, "
+                f"reason={signal_reason}, "
+                f"CURRENT_POSITION={CURRENT_POSITION}, "
+                f"LAST_PROCESSED_CANDLE={LAST_PROCESSED_CANDLE}"
+            )
+
+            print("Updated CURRENT_POSITION =", CURRENT_POSITION)
+        else:
+            msg = (
+                f"Order may not have succeeded cleanly. "
+                f"side={side}, order_id={order_id}, "
+                f"explicit_failure={explicit_failure}, explicit_success={explicit_success}, "
+                f"position_before_trade={position_before_trade}, "
+                f"position_after_trade={CURRENT_POSITION}"
+            )
+            print(msg)
+            activity_logger.warning(msg)
 
     except Exception as e:
         print("run_once failed:", e)
