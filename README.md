@@ -161,6 +161,102 @@ This is useful when:
 
 ## 4. Setup Instructions & How to Run the Bot
 
+### Prerequisites
+Before running the bot, ensure you have:
+- Python 3.10 or above
+- `pip` installed
+- internet access for Binance market data
+- valid Roostoo mock trading credentials set in your environment if required by your setup
+
+### Step 1: Clone the repository
+
+~~~bash
+git clone <your-repo-url>
+cd sg-hk-quant-bot
+~~~
+
+### Step 2: Install dependencies
+
+~~~bash
+pip install -r requirements.txt
+~~~
+
+### Step 3: Configure the bot
+
+Update the main configuration file at:
+
+~~~bash
+bot/config/settings.py
+~~~
+
+Example configuration:
+
+~~~python
+BINANCE_SYMBOL = "BTCUSDT"
+ROOSTOO_PAIR = "BTC/USD"
+INTERVAL = "15m"
+LIMIT = 3000
+VWAP_WINDOW = 20
+LOWER_STD_MULT = 1.75
+STRONG_EXIT_STD_MULT = 2.5
+TREND_WINDOW = 48
+INITIAL_CASH = 50000
+POLL_SECONDS = 60
+BASE_COIN = "BTC"
+TARGET_ALLOC_PCT = 0.30
+MIN_QTY = 0.001
+MAX_QTY = 10.0
+QTY_DECIMALS = 4
+SELL_BUFFER_RATIO = 0.999
+STOP_LOSS_PCT = 0.05
+TOP_UP_THRESHOLD_RATIO = 0.95
+~~~
+
+If your Roostoo client requires API credentials, export them before running the bot:
+
+~~~bash
+export ROOSTOO_API_KEY=your_key_here
+export ROOSTOO_API_SECRET=your_secret_here
+~~~
+
+### Step 4: Run the live bot
+
+~~~bash
+python3 -m bot.main
+~~~
+
+The live bot will:
+- fetch the latest Binance candles
+- compute VWAP and trading signals
+- check the latest closed candle
+- determine whether to buy, top up, sell, or stop out
+- place mock market orders through Roostoo
+- save runtime state and write logs for monitoring
+
+### Step 5: Run the backtest
+
+~~~bash
+python3 backtest.py
+~~~
+
+The backtest uses historical Binance data and prints key metrics such as:
+- total return
+- buy-and-hold return
+- max drawdown
+- Sharpe ratio
+- Sortino ratio
+- Calmar ratio
+- trade count
+- stop-loss exit count
+
+### Step 6: Runtime files
+
+When the bot runs, it may automatically create:
+- `bot/runtime_state.json` to persist live position state across restarts
+- log files for bot activity and trade history
+
+These files are generated locally during execution and do not need to be manually created.
+
 ### Project structure
 
 ```bash
@@ -177,7 +273,6 @@ sg-hk-quant-bot/
 │   │   └── trade_logger.py
 │   ├── strategy/
 │   │   └── vwap_reversion.py
-│   ├── main.py
-│   └── runtime_state.json
+│   └── main.py
 ├── backtest.py
 └── README.md
