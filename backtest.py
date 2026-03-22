@@ -1,9 +1,23 @@
-import pandas as pd
-import numpy as np
+import math
 
+import numpy as np
+import pandas as pd
+
+from bot.config import settings
 from bot.data.binance_loader import load_binance_klines
 from bot.strategy.vwap_reversion import generate_vwap_signal
-from bot.config import settings
+
+
+def safe_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def round_down(value: float, decimals: int) -> float:
+    factor = 10 ** max(decimals, 0)
+    return math.floor(value * factor) / factor
 
 
 def get_periods_per_year(interval: str) -> int:
@@ -15,6 +29,37 @@ def get_periods_per_year(interval: str) -> int:
         "1m": 60 * 24 * 365,
     }
     return mapping.get(interval, 365)
+
+
+def get_target_alloc_pct() -> float:
+    pct = safe_float(getattr(settings, "TARGET_ALLOC_PCT", 1.0), 1.0)
+    return min(max(pct, 0.0), 1.0)
+
+
+def get_stop_loss_pct() -> float:
+    pct = safe_float(getattr(settings, "STOP_LOSS_PCT", 0.0), 0.0)
+    return max(pct, 0.0)
+
+
+def get_min_qty() -> float:
+    return max(safe_float(getattr(settings, "MIN_QTY", 0.0), 0.0), 0.0)
+
+
+def get_max_qty() -> float:
+    max_qty = safe_float(getattr(settings, "MAX_QTY", 0.0), 0.0)
+    return max_qty if max_qty > 0 else float("inf")
+
+
+def get_qty_decimals() -> int:
+    try:
+        return max(int(getattr(settings, "QTY_DECIMALS", 8)), 0)
+    except (TypeError, ValueError):
+        return 8
+
+
+def get_sell_buffer_ratio() -> float:
+    ratio = safe_float(getattr(settings, "SELL_BUFFER_RATIO", 1.0), 1.0)
+    return min(max(ratio, 0.0), 1.0)
 
 
 def compute_metrics(
@@ -76,6 +121,12 @@ def compute_trade_stats(df: pd.DataFrame) -> dict:
     total_orders = entries + exits
     round_trips = min(entries, exits)
 
+    stop_loss_exits = 0
+    signal_exits = 0
+    if "exit_reason" in out.columns:
+        stop_loss_exits = int((out["exit_reason"] == "stop_loss").sum())
+        signal_exits = int((out["exit_reason"] == "signal_exit").sum())
+
     if "open_time" in out.columns:
         out["trade_date"] = pd.to_datetime(out["open_time"]).dt.date
     else:
@@ -96,6 +147,8 @@ def compute_trade_stats(df: pd.DataFrame) -> dict:
     return {
         "entries": entries,
         "exits": exits,
+        "stop_loss_exits": stop_loss_exits,
+        "signal_exits": signal_exits,
         "total_orders": total_orders,
         "round_trips": round_trips,
         "active_days": active_days,
@@ -123,14 +176,119 @@ def backtest_vwap_strategy(
         lower_std_mult=lower_std_mult,
         strong_exit_std_mult=strong_exit_std_mult,
         trend_window=trend_window,
-    )
+    ).copy()
 
-    df["position"] = df["signal"].shift(1).fillna(0).astype(int)
-    df["return"] = df["close"].pct_change().fillna(0)
-    df["strategy_return"] = df["position"] * df["return"]
+    target_alloc_pct = get_target_alloc_pct()
+    stop_loss_pct = get_stop_loss_pct()
+    min_qty = get_min_qty()
+    max_qty = get_max_qty()
+    qty_decimals = get_qty_decimals()
+    sell_buffer_ratio = get_sell_buffer_ratio()
 
+    df["return"] = df["close"].pct_change().fillna(0.0)
     df["buy_and_hold_equity"] = initial_cash * (1 + df["return"]).cumprod()
-    df["strategy_equity"] = initial_cash * (1 + df["strategy_return"]).cumprod()
+
+    cash = safe_float(initial_cash, 0.0)
+    base_qty = 0.0
+    entry_price = None
+    stop_loss_price = None
+    prev_equity = cash
+
+    strategy_returns = []
+    strategy_equity = []
+    positions_before_trade = []
+    positions_after_trade = []
+    cash_series = []
+    base_qty_series = []
+    entry_price_series = []
+    stop_loss_price_series = []
+    trade_actions = []
+    exit_reasons = []
+
+    prev_signal = 0
+
+    for _, row in df.iterrows():
+        close_price = safe_float(row["close"], 0.0)
+        latest_signal = int(safe_float(row.get("signal", 0), 0))
+
+        position_before_trade = 1 if base_qty > 0 else 0
+        equity_before_trade = cash + (base_qty * close_price)
+        strategy_return = 0.0 if prev_equity <= 0 else (equity_before_trade / prev_equity) - 1
+
+        trade_action = ""
+        exit_reason = ""
+
+        if position_before_trade == 1:
+            stop_hit = (
+                stop_loss_price is not None
+                and stop_loss_pct > 0
+                and close_price > 0
+                and close_price <= stop_loss_price
+            )
+            signal_exit = prev_signal == 1 and latest_signal == 0
+
+            if stop_hit or signal_exit:
+                sell_qty = round_down(base_qty * sell_buffer_ratio, qty_decimals)
+                if sell_qty <= 0:
+                    sell_qty = round_down(base_qty, qty_decimals)
+                if sell_qty > base_qty:
+                    sell_qty = base_qty
+
+                cash += sell_qty * close_price
+                base_qty -= sell_qty
+
+                if base_qty < min_qty:
+                    cash += base_qty * close_price
+                    base_qty = 0.0
+
+                entry_price = None
+                stop_loss_price = None
+                trade_action = "SELL"
+                exit_reason = "stop_loss" if stop_hit else "signal_exit"
+
+        if base_qty <= 0 and prev_signal == 0 and latest_signal == 1 and close_price > 0:
+            portfolio_value = cash
+            target_notional = portfolio_value * target_alloc_pct
+            buy_qty = round_down(target_notional / close_price, qty_decimals)
+            buy_qty = min(buy_qty, max_qty)
+
+            if buy_qty >= min_qty:
+                buy_cost = buy_qty * close_price
+                if buy_cost <= cash:
+                    cash -= buy_cost
+                    base_qty = buy_qty
+                    entry_price = close_price
+                    stop_loss_price = close_price * (1 - stop_loss_pct) if stop_loss_pct > 0 else None
+                    trade_action = "BUY"
+                    exit_reason = ""
+
+        position_after_trade = 1 if base_qty > 0 else 0
+        equity_after_trade = cash + (base_qty * close_price)
+
+        strategy_returns.append(strategy_return)
+        strategy_equity.append(equity_after_trade)
+        positions_before_trade.append(position_before_trade)
+        positions_after_trade.append(position_after_trade)
+        cash_series.append(cash)
+        base_qty_series.append(base_qty)
+        entry_price_series.append(entry_price if entry_price is not None else np.nan)
+        stop_loss_price_series.append(stop_loss_price if stop_loss_price is not None else np.nan)
+        trade_actions.append(trade_action)
+        exit_reasons.append(exit_reason)
+
+        prev_equity = equity_after_trade
+        prev_signal = latest_signal
+
+    df["position_before_trade"] = positions_before_trade
+    df["position"] = positions_after_trade
+    df["cash"] = cash_series
+    df["base_qty"] = base_qty_series
+    df["entry_price"] = entry_price_series
+    df["stop_loss_price"] = stop_loss_price_series
+    df["trade_action"] = trade_actions
+    df["exit_reason"] = exit_reasons
+    df["strategy_return"] = pd.Series(strategy_returns, index=df.index)
+    df["strategy_equity"] = pd.Series(strategy_equity, index=df.index)
 
     strategy_total_return = df["strategy_equity"].iloc[-1] / initial_cash - 1
     bh_total_return = df["buy_and_hold_equity"].iloc[-1] / initial_cash - 1
@@ -153,6 +311,8 @@ def backtest_vwap_strategy(
     print(f"Backtest interval:      {interval}")
     print(f"Bars loaded:            {len(df)}")
     print(f"Sample days:            {trade_stats['sample_days']:.2f}")
+    print(f"Target allocation:      {target_alloc_pct:.2%}")
+    print(f"Stop loss pct:          {stop_loss_pct:.2%}")
     print()
     print(f"Strategy total return:  {strategy_total_return:.2%}")
     print(f"Buy and hold return:    {bh_total_return:.2%}")
@@ -161,6 +321,8 @@ def backtest_vwap_strategy(
     print("Trade frequency")
     print(f"Entries:                {trade_stats['entries']}")
     print(f"Exits:                  {trade_stats['exits']}")
+    print(f"Stop-loss exits:        {trade_stats['stop_loss_exits']}")
+    print(f"Signal exits:           {trade_stats['signal_exits']}")
     print(f"Total orders:           {trade_stats['total_orders']}")
     print(f"Completed round trips:  {trade_stats['round_trips']}")
     print(f"Active trading days:    {trade_stats['active_days']}")
