@@ -2,7 +2,7 @@
 
 A long-only quantitative trading bot built for the **SG vs HK University Web3 Quant Hackathon**.
 
-The bot uses **Binance BTC/USDT market data** to generate signals from a **VWAP mean reversion strategy**, then sends **mock market orders** to the **Roostoo mock exchange**. It is designed to be simple, transparent, and easy for judges to understand and reproduce.
+The bot uses **Binance BTC/USDT market data** to generate signals from a **VWAP mean reversion strategy**, then sends **mock market orders** to the **Roostoo mock exchange**. 
 
 ---
 
