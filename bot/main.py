@@ -72,6 +72,11 @@ def get_stop_loss_pct() -> float:
     return max(pct, 0.0)
 
 
+def get_top_up_threshold_ratio() -> float:
+    ratio = safe_float(getattr(settings, "TOP_UP_THRESHOLD_RATIO", 0.95), 0.95)
+    return min(max(ratio, 0.0), 1.0)
+
+
 def save_runtime_state() -> None:
     state = {
         "last_processed_candle": LAST_PROCESSED_CANDLE,
@@ -375,6 +380,24 @@ def compute_entry_qty(latest_price: float, balances: dict, quote_coin: str) -> f
     return qty
 
 
+def compute_top_up_qty(latest_price: float, balances: dict, quote_coin: str):
+    min_qty = get_min_qty()
+    qty_decimals = get_qty_decimals()
+
+    current_base = safe_float(balances.get("free_base"), 0.0)
+    target_qty = compute_entry_qty(latest_price, balances, quote_coin)
+
+    if target_qty <= 0:
+        return 0.0, target_qty, current_base
+
+    gap_qty = round_down(max(target_qty - current_base, 0.0), qty_decimals)
+
+    if gap_qty < min_qty:
+        return 0.0, target_qty, current_base
+
+    return gap_qty, target_qty, current_base
+
+
 def compute_exit_qty(balances: dict) -> float:
     min_qty = get_min_qty()
     max_qty = get_max_qty()
@@ -515,6 +538,7 @@ def run_once():
 
         latest_close = safe_float(latest_row["close"], 0.0)
         stop_loss_pct = get_stop_loss_pct()
+        top_up_threshold_ratio = get_top_up_threshold_ratio()
         candle_time = str(latest_row["close_time"])
         print("\nLatest closed candle_time =", candle_time)
 
@@ -560,6 +584,9 @@ def run_once():
         side = None
         signal_reason = None
         trade_qty = 0.0
+        buy_was_top_up = False
+        pre_trade_base_qty = 0.0
+        target_qty_before_trade = 0.0
 
         if (
             CURRENT_POSITION == 1
@@ -628,6 +655,7 @@ def run_once():
 
             available_quote = get_available_quote_balance(quote_coin, balances)
             trade_qty = compute_entry_qty(latest_close, balances, quote_coin)
+            target_qty_before_trade = trade_qty
             estimated_cost = trade_qty * latest_close * BUY_BUFFER_RATIO
 
             print("Computed BUY qty:", trade_qty)
@@ -662,6 +690,91 @@ def run_once():
 
             side = "BUY"
             signal_reason = "Signal flipped from 0 to 1 on latest closed candle"
+
+        elif CURRENT_POSITION == 1 and latest_signal == 1:
+            balances = log_balances(
+                base_coin,
+                quote_coin,
+                prefix="Checking balances before TOP-UP BUY...",
+                force_refresh=True,
+            )
+            require_balance_snapshot(balances, "TOP-UP BUY balance check")
+
+            if latest_close <= 0:
+                msg = "Skip TOP-UP BUY: invalid latest close price."
+                print(msg)
+                activity_logger.info(msg)
+                LAST_PROCESSED_CANDLE = candle_time
+                save_runtime_state()
+                return
+
+            available_quote = get_available_quote_balance(quote_coin, balances)
+            trade_qty, target_qty_before_trade, current_base = compute_top_up_qty(
+                latest_close, balances, quote_coin
+            )
+
+            needs_top_up = (
+                target_qty_before_trade > 0
+                and current_base < target_qty_before_trade * top_up_threshold_ratio
+            )
+            estimated_cost = trade_qty * latest_close * BUY_BUFFER_RATIO
+
+            print("Current base qty:", current_base)
+            print("Target qty:", target_qty_before_trade)
+            print("Computed TOP-UP BUY qty:", trade_qty)
+            print("Estimated TOP-UP BUY cost:", estimated_cost)
+            print("Available quote balance:", available_quote)
+
+            activity_logger.info(
+                "TOP-UP BUY sizing: current_base={0}, target_qty={1}, top_up_qty={2}, estimated_cost={3}, available_quote={4}".format(
+                    current_base,
+                    target_qty_before_trade,
+                    trade_qty,
+                    estimated_cost,
+                    available_quote,
+                )
+            )
+
+            if not needs_top_up:
+                msg = (
+                    "No top-up needed. current_base={0}, target_qty={1}, threshold_ratio={2}".format(
+                        current_base, target_qty_before_trade, top_up_threshold_ratio
+                    )
+                )
+                print(msg)
+                activity_logger.info(msg)
+                LAST_PROCESSED_CANDLE = candle_time
+                save_runtime_state()
+                return
+
+            if trade_qty <= 0:
+                msg = "Skip TOP-UP BUY: computed top-up quantity is too small."
+                print(msg)
+                activity_logger.info(msg)
+                LAST_PROCESSED_CANDLE = candle_time
+                save_runtime_state()
+                return
+
+            if available_quote < estimated_cost:
+                msg = (
+                    "Skip TOP-UP BUY: available quote balance {0} is below estimated cost {1}".format(
+                        available_quote, estimated_cost
+                    )
+                )
+                print(msg)
+                activity_logger.info(msg)
+                LAST_PROCESSED_CANDLE = candle_time
+                save_runtime_state()
+                return
+
+            side = "BUY"
+            buy_was_top_up = True
+            pre_trade_base_qty = current_base
+            signal_reason = (
+                "Top-up buy: current base {0} is below target qty {1}".format(
+                    current_base, target_qty_before_trade
+                )
+            )
 
         elif CURRENT_POSITION == 1 and prev_signal == 1 and latest_signal == 0:
             balances = log_balances(
@@ -776,8 +889,21 @@ def run_once():
             )
 
             if side == "BUY":
-                CURRENT_ENTRY_PRICE = fill_price_for_state
-                CURRENT_STOP_LOSS_PRICE = fill_price_for_state * (1 - stop_loss_pct)
+                if (
+                    buy_was_top_up
+                    and entry_price_before_trade is not None
+                    and pre_trade_base_qty > 0
+                    and trade_qty > 0
+                ):
+                    total_qty = pre_trade_base_qty + trade_qty
+                    CURRENT_ENTRY_PRICE = (
+                        (pre_trade_base_qty * entry_price_before_trade)
+                        + (trade_qty * fill_price_for_state)
+                    ) / total_qty
+                else:
+                    CURRENT_ENTRY_PRICE = fill_price_for_state
+
+                CURRENT_STOP_LOSS_PRICE = CURRENT_ENTRY_PRICE * (1 - stop_loss_pct)
             else:
                 CURRENT_ENTRY_PRICE = None
                 CURRENT_STOP_LOSS_PRICE = None
@@ -802,11 +928,15 @@ def run_once():
                     "current_position_before_trade": position_before_trade,
                     "current_position_after_trade": CURRENT_POSITION,
                     "trade_qty": trade_qty,
+                    "buy_was_top_up": buy_was_top_up,
+                    "pre_trade_base_qty": pre_trade_base_qty,
+                    "target_qty_before_trade": target_qty_before_trade,
                     "entry_price_before_trade": entry_price_before_trade,
                     "stop_loss_price_before_trade": stop_loss_price_before_trade,
                     "entry_price_after_trade": CURRENT_ENTRY_PRICE,
                     "stop_loss_price_after_trade": CURRENT_STOP_LOSS_PRICE,
                     "stop_loss_pct": stop_loss_pct,
+                    "top_up_threshold_ratio": top_up_threshold_ratio,
                     "vwap": float(latest_row["vwap"]),
                     "lower_band": float(latest_row["lower_band"]),
                     "strong_upper_band": float(latest_row["strong_upper_band"]),
