@@ -1,5 +1,7 @@
 import math
 import time
+import json
+from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
 
@@ -21,6 +23,9 @@ activity_logger = setup_activity_logger()
 
 LAST_PROCESSED_CANDLE = None
 CURRENT_POSITION = None  # 0 = flat, 1 = long
+CURRENT_ENTRY_PRICE = None
+CURRENT_STOP_LOSS_PRICE = None
+STATE_FILE = Path("bot/runtime_state.json")
 
 HOLDING_THRESHOLD_RATIO = 0.80
 BUY_BUFFER_RATIO = 1.01
@@ -60,6 +65,59 @@ def get_target_alloc_pct() -> float:
 
 def get_sell_buffer_ratio() -> float:
     return safe_float(getattr(settings, "SELL_BUFFER_RATIO", 0.999), 0.999)
+
+
+def get_stop_loss_pct() -> float:
+    pct = safe_float(getattr(settings, "STOP_LOSS_PCT", 0.03), 0.03)
+    return max(pct, 0.0)
+
+
+def save_runtime_state() -> None:
+    state = {
+        "last_processed_candle": LAST_PROCESSED_CANDLE,
+        "current_position": CURRENT_POSITION,
+        "current_entry_price": CURRENT_ENTRY_PRICE,
+        "current_stop_loss_price": CURRENT_STOP_LOSS_PRICE,
+    }
+
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception as e:
+        print("Failed to save runtime state:", e)
+        activity_logger.exception("Failed to save runtime state")
+
+
+def load_runtime_state() -> None:
+    global LAST_PROCESSED_CANDLE, CURRENT_POSITION
+    global CURRENT_ENTRY_PRICE, CURRENT_STOP_LOSS_PRICE
+
+    if not STATE_FILE.exists():
+        return
+
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f)
+
+        LAST_PROCESSED_CANDLE = state.get("last_processed_candle")
+        CURRENT_POSITION = state.get("current_position")
+        CURRENT_ENTRY_PRICE = safe_float(state.get("current_entry_price"), default=0.0)
+        CURRENT_STOP_LOSS_PRICE = safe_float(
+            state.get("current_stop_loss_price"), default=0.0
+        )
+
+        if CURRENT_ENTRY_PRICE <= 0:
+            CURRENT_ENTRY_PRICE = None
+        if CURRENT_STOP_LOSS_PRICE <= 0:
+            CURRENT_STOP_LOSS_PRICE = None
+
+        print("Loaded runtime state:", state)
+        activity_logger.info("Loaded runtime state: {0}".format(state))
+
+    except Exception as e:
+        print("Failed to load runtime state:", e)
+        activity_logger.exception("Failed to load runtime state")
 
 
 def round_down(value: float, decimals: int) -> float:
@@ -372,6 +430,7 @@ def query_order_safely(pair: str, order_id: str = ""):
 
 def run_once():
     global LAST_PROCESSED_CANDLE, CURRENT_POSITION
+    global CURRENT_ENTRY_PRICE, CURRENT_STOP_LOSS_PRICE
 
     print("Entered run_once")
 
@@ -455,6 +514,7 @@ def run_once():
         latest_row = df.iloc[-2]
 
         latest_close = safe_float(latest_row["close"], 0.0)
+        stop_loss_pct = get_stop_loss_pct()
         candle_time = str(latest_row["close_time"])
         print("\nLatest closed candle_time =", candle_time)
 
@@ -479,13 +539,77 @@ def run_once():
             print(msg)
             activity_logger.info(msg)
             LAST_PROCESSED_CANDLE = candle_time
+            save_runtime_state()
             return
+
+        if CURRENT_POSITION == 1 and CURRENT_ENTRY_PRICE is None and latest_close > 0:
+            CURRENT_ENTRY_PRICE = latest_close
+            CURRENT_STOP_LOSS_PRICE = latest_close * (1 - stop_loss_pct)
+
+            msg = (
+                "Position detected but no saved entry price found. "
+                "Bootstrapping stop loss from latest close. "
+                "entry_price={0}, stop_loss={1}".format(
+                    CURRENT_ENTRY_PRICE, CURRENT_STOP_LOSS_PRICE
+                )
+            )
+            print(msg)
+            activity_logger.warning(msg)
+            save_runtime_state()
 
         side = None
         signal_reason = None
         trade_qty = 0.0
 
-        if CURRENT_POSITION == 0 and prev_signal == 0 and latest_signal == 1:
+        if (
+            CURRENT_POSITION == 1
+            and CURRENT_STOP_LOSS_PRICE is not None
+            and latest_close > 0
+            and latest_close <= CURRENT_STOP_LOSS_PRICE
+        ):
+            balances = log_balances(
+                base_coin,
+                quote_coin,
+                prefix="Checking balances before STOP-LOSS SELL...",
+                force_refresh=True,
+            )
+            require_balance_snapshot(balances, "STOP-LOSS SELL balance check")
+
+            free_base = balances["free_base"]
+            trade_qty = compute_exit_qty(balances)
+
+            print("Computed STOP-LOSS SELL qty:", trade_qty)
+            print("Free base balance:", free_base)
+            print("Current entry price:", CURRENT_ENTRY_PRICE)
+            print("Current stop loss price:", CURRENT_STOP_LOSS_PRICE)
+            print("Latest close:", latest_close)
+
+            activity_logger.info(
+                "STOP-LOSS SELL sizing: order_qty={0}, free_base={1}, entry_price={2}, stop_loss_price={3}, latest_close={4}".format(
+                    trade_qty,
+                    free_base,
+                    CURRENT_ENTRY_PRICE,
+                    CURRENT_STOP_LOSS_PRICE,
+                    latest_close,
+                )
+            )
+
+            if trade_qty <= 0:
+                msg = "Skip STOP-LOSS SELL: computed exit quantity is too small."
+                print(msg)
+                activity_logger.info(msg)
+                LAST_PROCESSED_CANDLE = candle_time
+                save_runtime_state()
+                return
+
+            side = "SELL"
+            signal_reason = (
+                "Stop loss hit: latest close {0} <= stop loss {1}".format(
+                    latest_close, CURRENT_STOP_LOSS_PRICE
+                )
+            )
+
+        elif CURRENT_POSITION == 0 and prev_signal == 0 and latest_signal == 1:
             balances = log_balances(
                 base_coin,
                 quote_coin,
@@ -499,6 +623,7 @@ def run_once():
                 print(msg)
                 activity_logger.info(msg)
                 LAST_PROCESSED_CANDLE = candle_time
+                save_runtime_state()
                 return
 
             available_quote = get_available_quote_balance(quote_coin, balances)
@@ -520,6 +645,7 @@ def run_once():
                 print(msg)
                 activity_logger.info(msg)
                 LAST_PROCESSED_CANDLE = candle_time
+                save_runtime_state()
                 return
 
             if available_quote < estimated_cost:
@@ -531,6 +657,7 @@ def run_once():
                 print(msg)
                 activity_logger.info(msg)
                 LAST_PROCESSED_CANDLE = candle_time
+                save_runtime_state()
                 return
 
             side = "BUY"
@@ -562,6 +689,7 @@ def run_once():
                 print(msg)
                 activity_logger.info(msg)
                 LAST_PROCESSED_CANDLE = candle_time
+                save_runtime_state()
                 return
 
             side = "SELL"
@@ -576,9 +704,12 @@ def run_once():
             print(msg)
             activity_logger.info(msg)
             LAST_PROCESSED_CANDLE = candle_time
+            save_runtime_state()
             return
 
         position_before_trade = CURRENT_POSITION
+        entry_price_before_trade = CURRENT_ENTRY_PRICE
+        stop_loss_price_before_trade = CURRENT_STOP_LOSS_PRICE
 
         print("\nPlacing {0} order...".format(side))
         activity_logger.info(
@@ -640,6 +771,19 @@ def run_once():
         LAST_PROCESSED_CANDLE = candle_time
 
         if order_success:
+            fill_price_for_state = (
+                actual_trade_price if actual_trade_price is not None else latest_close
+            )
+
+            if side == "BUY":
+                CURRENT_ENTRY_PRICE = fill_price_for_state
+                CURRENT_STOP_LOSS_PRICE = fill_price_for_state * (1 - stop_loss_pct)
+            else:
+                CURRENT_ENTRY_PRICE = None
+                CURRENT_STOP_LOSS_PRICE = None
+
+            save_runtime_state()
+
             trade_logger.log_trade(
                 symbol=symbol,
                 side=side,
@@ -658,6 +802,11 @@ def run_once():
                     "current_position_before_trade": position_before_trade,
                     "current_position_after_trade": CURRENT_POSITION,
                     "trade_qty": trade_qty,
+                    "entry_price_before_trade": entry_price_before_trade,
+                    "stop_loss_price_before_trade": stop_loss_price_before_trade,
+                    "entry_price_after_trade": CURRENT_ENTRY_PRICE,
+                    "stop_loss_price_after_trade": CURRENT_STOP_LOSS_PRICE,
+                    "stop_loss_pct": stop_loss_pct,
                     "vwap": float(latest_row["vwap"]),
                     "lower_band": float(latest_row["lower_band"]),
                     "strong_upper_band": float(latest_row["strong_upper_band"]),
@@ -678,7 +827,10 @@ def run_once():
             )
 
             print("Updated CURRENT_POSITION =", CURRENT_POSITION)
+            print("Updated CURRENT_ENTRY_PRICE =", CURRENT_ENTRY_PRICE)
+            print("Updated CURRENT_STOP_LOSS_PRICE =", CURRENT_STOP_LOSS_PRICE)
         else:
+            save_runtime_state()
             msg = (
                 "Order may not have succeeded cleanly. side={0}, order_id={1}, explicit_failure={2}, explicit_success={3}, position_before_trade={4}, position_after_trade={5}".format(
                     side,
@@ -701,6 +853,7 @@ def run_once():
 if __name__ == "__main__":
     print("Starting bot...")
     activity_logger.info("Bot started")
+    load_runtime_state()
 
     poll_seconds = getattr(settings, "POLL_SECONDS", 60)
 
