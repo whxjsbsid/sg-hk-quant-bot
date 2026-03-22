@@ -566,6 +566,27 @@ def run_once():
             save_runtime_state()
             return
 
+        reconciliation_balances = log_balances(
+            base_coin,
+            quote_coin,
+            prefix="Checking balances for state reconciliation...",
+            force_refresh=True,
+        )
+        require_balance_snapshot(reconciliation_balances, "state reconciliation")
+
+        live_base_qty = safe_float(reconciliation_balances.get("free_base"), 0.0)
+        live_position = infer_position_from_base_balance(live_base_qty)
+
+        if CURRENT_POSITION != live_position:
+            msg = (
+                "Reconciling CURRENT_POSITION from runtime state {0} to live balance position {1}. "
+                "live_base_qty={2}".format(CURRENT_POSITION, live_position, live_base_qty)
+            )
+            print(msg)
+            activity_logger.warning(msg)
+            CURRENT_POSITION = live_position
+            save_runtime_state()
+
         if CURRENT_POSITION == 1 and CURRENT_ENTRY_PRICE is None and latest_close > 0:
             CURRENT_ENTRY_PRICE = latest_close
             CURRENT_STOP_LOSS_PRICE = latest_close * (1 - stop_loss_pct)
@@ -636,7 +657,7 @@ def run_once():
                 )
             )
 
-        elif CURRENT_POSITION == 0 and prev_signal == 0 and latest_signal == 1:
+        elif CURRENT_POSITION == 0 and latest_signal == 1:
             balances = log_balances(
                 base_coin,
                 quote_coin,
@@ -689,7 +710,10 @@ def run_once():
                 return
 
             side = "BUY"
-            signal_reason = "Signal flipped from 0 to 1 on latest closed candle"
+            if prev_signal == 0:
+                signal_reason = "Signal flipped from 0 to 1 on latest closed candle"
+            else:
+                signal_reason = "Flat while signal is still 1, buying back to target allocation"
 
         elif CURRENT_POSITION == 1 and latest_signal == 1:
             balances = log_balances(
