@@ -121,10 +121,6 @@ def get_holding_threshold_ratio() -> float:
     return max(get_float_setting("HOLDING_THRESHOLD_RATIO", 0.80), 0.0)
 
 
-def get_buy_buffer_ratio() -> float:
-    return max(get_float_setting("BUY_BUFFER_RATIO", 1.01), 0.0)
-
-
 def save_runtime_state() -> None:
     state = {
         "last_processed_candle": LAST_PROCESSED_CANDLE,
@@ -535,7 +531,6 @@ def run_once():
     limit = get_int_setting("LIMIT", 3000)
     stop_loss_pct = get_stop_loss_pct()
     top_up_threshold_ratio = get_top_up_threshold_ratio()
-    buy_buffer_ratio = get_buy_buffer_ratio()
 
     signal_kwargs = build_signal_kwargs()
 
@@ -737,7 +732,7 @@ def run_once():
             available_quote = get_available_quote_balance(quote_coin, balances)
             trade_qty = compute_entry_qty(latest_close, balances, quote_coin)
             target_qty_before_trade = trade_qty
-            estimated_cost = trade_qty * latest_close * buy_buffer_ratio
+            estimated_cost = trade_qty * latest_close
 
             print("Computed BUY qty:", trade_qty)
             print("Estimated BUY cost:", estimated_cost)
@@ -801,7 +796,7 @@ def run_once():
                 target_qty_before_trade > 0
                 and current_base < target_qty_before_trade * top_up_threshold_ratio
             )
-            estimated_cost = trade_qty * latest_close * buy_buffer_ratio
+            estimated_cost = trade_qty * latest_close
 
             print("Current base qty:", current_base)
             print("Target qty:", target_qty_before_trade)
@@ -1021,7 +1016,6 @@ def run_once():
                     "stop_loss_price_after_trade": CURRENT_STOP_LOSS_PRICE,
                     "stop_loss_pct": stop_loss_pct,
                     "top_up_threshold_ratio": top_up_threshold_ratio,
-                    "buy_buffer_ratio": buy_buffer_ratio,
                     "holding_threshold_ratio": get_holding_threshold_ratio(),
                     "signal_kwargs": signal_kwargs,
                     "vwap": float(latest_row["vwap"]),
