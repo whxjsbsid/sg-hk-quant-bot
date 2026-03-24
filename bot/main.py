@@ -1,20 +1,22 @@
+import inspect
+import json
 import math
 import time
-import json
 from pathlib import Path
 from typing import Optional
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
 print("bot.main started")
 
-from bot.execution.roostoo_client import RoostooClient
-from bot.logs.trade_logger import TradeLogger
-from bot.logs.activity_logger import setup_activity_logger
-from bot.data.binance_loader import load_binance_klines
-from bot.strategy.vwap_reversion import generate_vwap_signal
 from bot.config import settings
+from bot.data.binance_loader import load_binance_klines
+from bot.execution.roostoo_client import RoostooClient
+from bot.logs.activity_logger import setup_activity_logger
+from bot.logs.trade_logger import TradeLogger
+from bot.strategy.vwap_reversion import generate_vwap_signal
 
 
 client = RoostooClient()
@@ -25,17 +27,17 @@ LAST_PROCESSED_CANDLE = None
 CURRENT_POSITION = None  # 0 = flat, 1 = long
 CURRENT_ENTRY_PRICE = None
 CURRENT_STOP_LOSS_PRICE = None
-STATE_FILE = Path("bot/runtime_state.json")
-
-HOLDING_THRESHOLD_RATIO = 0.80
-BUY_BUFFER_RATIO = 1.01
 
 
-def parse_pair(pair: str) -> tuple:
-    if "/" in pair:
-        base_coin, quote_coin = pair.split("/", 1)
-        return base_coin.strip().upper(), quote_coin.strip().upper()
-    return "BTC", "USD"
+def get_setting(name: str, default=None):
+    return getattr(settings, name, default)
+
+
+def get_str_setting(name: str, default: str) -> str:
+    value = get_setting(name, default)
+    if value is None:
+        return default
+    return str(value)
 
 
 def safe_float(value, default: float = 0.0) -> float:
@@ -47,34 +49,80 @@ def safe_float(value, default: float = 0.0) -> float:
         return default
 
 
+def get_float_setting(name: str, default: float) -> float:
+    return safe_float(get_setting(name, default), default)
+
+
+def get_int_setting(name: str, default: int) -> int:
+    value = get_setting(name, default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def get_bool_setting(name: str, default: bool) -> bool:
+    value = get_setting(name, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    return bool(value)
+
+
+def get_state_file() -> Path:
+    return Path(get_str_setting("RUNTIME_STATE_FILE", "bot/runtime_state.json"))
+
+
+def parse_pair(pair: str) -> tuple:
+    if "/" in pair:
+        base_coin, quote_coin = pair.split("/", 1)
+        return base_coin.strip().upper(), quote_coin.strip().upper()
+
+    base_coin = get_str_setting("BASE_COIN", "BTC").strip().upper()
+    quote_coin = get_str_setting("QUOTE_COIN", "USD").strip().upper()
+    return base_coin, quote_coin
+
+
 def get_min_qty() -> float:
-    return safe_float(getattr(settings, "MIN_QTY", 0.001), 0.001)
-
-
-def get_max_qty() -> float:
-    return safe_float(getattr(settings, "MAX_QTY", 10.0), 10.0)
+    return get_float_setting("MIN_QTY", 0.001)
 
 
 def get_qty_decimals() -> int:
-    return int(getattr(settings, "QTY_DECIMALS", 4))
+    return get_int_setting("QTY_DECIMALS", 4)
 
 
 def get_target_alloc_pct() -> float:
-    return safe_float(getattr(settings, "TARGET_ALLOC_PCT", 0.20), 0.20)
+    return get_float_setting("TARGET_ALLOC_PCT", 0.20)
 
 
 def get_sell_buffer_ratio() -> float:
-    return safe_float(getattr(settings, "SELL_BUFFER_RATIO", 0.999), 0.999)
+    return get_float_setting("SELL_BUFFER_RATIO", 0.999)
+
+
+def get_close_full_position_on_exit() -> bool:
+    return get_bool_setting("CLOSE_FULL_POSITION_ON_EXIT", True)
 
 
 def get_stop_loss_pct() -> float:
-    pct = safe_float(getattr(settings, "STOP_LOSS_PCT", 0.03), 0.03)
-    return max(pct, 0.0)
+    return max(get_float_setting("STOP_LOSS_PCT", 0.03), 0.0)
 
 
 def get_top_up_threshold_ratio() -> float:
-    ratio = safe_float(getattr(settings, "TOP_UP_THRESHOLD_RATIO", 0.95), 0.95)
+    ratio = get_float_setting("TOP_UP_THRESHOLD_RATIO", 0.95)
     return min(max(ratio, 0.0), 1.0)
+
+
+def get_holding_threshold_ratio() -> float:
+    return max(get_float_setting("HOLDING_THRESHOLD_RATIO", 0.80), 0.0)
+
+
+def get_buy_buffer_ratio() -> float:
+    return max(get_float_setting("BUY_BUFFER_RATIO", 1.01), 0.0)
 
 
 def save_runtime_state() -> None:
@@ -85,9 +133,11 @@ def save_runtime_state() -> None:
         "current_stop_loss_price": CURRENT_STOP_LOSS_PRICE,
     }
 
+    state_file = get_state_file()
+
     try:
-        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(state_file, "w", encoding="utf-8") as f:
             json.dump(state, f)
     except Exception as e:
         print("Failed to save runtime state:", e)
@@ -98,11 +148,12 @@ def load_runtime_state() -> None:
     global LAST_PROCESSED_CANDLE, CURRENT_POSITION
     global CURRENT_ENTRY_PRICE, CURRENT_STOP_LOSS_PRICE
 
-    if not STATE_FILE.exists():
+    state_file = get_state_file()
+    if not state_file.exists():
         return
 
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
+        with open(state_file, "r", encoding="utf-8") as f:
             state = json.load(f)
 
         LAST_PROCESSED_CANDLE = state.get("last_processed_candle")
@@ -359,7 +410,6 @@ def get_total_equity(latest_price: float, balances: dict, quote_coin: str) -> fl
 def compute_entry_qty(latest_price: float, balances: dict, quote_coin: str) -> float:
     target_alloc_pct = get_target_alloc_pct()
     min_qty = get_min_qty()
-    max_qty = get_max_qty()
     qty_decimals = get_qty_decimals()
 
     if latest_price <= 0:
@@ -368,11 +418,7 @@ def compute_entry_qty(latest_price: float, balances: dict, quote_coin: str) -> f
     total_equity = get_total_equity(latest_price, balances, quote_coin)
     target_notional = total_equity * target_alloc_pct
     raw_qty = target_notional / latest_price
-
     qty = round_down(raw_qty, qty_decimals)
-
-    if max_qty > 0:
-        qty = min(qty, max_qty)
 
     if qty < min_qty:
         return 0.0
@@ -400,16 +446,17 @@ def compute_top_up_qty(latest_price: float, balances: dict, quote_coin: str):
 
 def compute_exit_qty(balances: dict) -> float:
     min_qty = get_min_qty()
-    max_qty = get_max_qty()
     qty_decimals = get_qty_decimals()
     sell_buffer_ratio = get_sell_buffer_ratio()
+    close_full_position_on_exit = get_close_full_position_on_exit()
 
     free_base = safe_float(balances.get("free_base"), 0.0)
-    raw_qty = free_base * sell_buffer_ratio
-    qty = round_down(raw_qty, qty_decimals)
 
-    if max_qty > 0:
-        qty = min(qty, max_qty)
+    if close_full_position_on_exit:
+        qty = round_down(free_base, qty_decimals)
+    else:
+        raw_qty = free_base * sell_buffer_ratio
+        qty = round_down(raw_qty, qty_decimals)
 
     if qty < min_qty:
         return 0.0
@@ -418,7 +465,7 @@ def compute_exit_qty(balances: dict) -> float:
 
 
 def infer_position_from_base_balance(free_base: float) -> int:
-    threshold = max(get_min_qty() * HOLDING_THRESHOLD_RATIO, 1e-12)
+    threshold = max(get_min_qty() * get_holding_threshold_ratio(), 1e-12)
     return 1 if free_base >= threshold else 0
 
 
@@ -451,20 +498,46 @@ def query_order_safely(pair: str, order_id: str = ""):
         return None
 
 
+def build_signal_kwargs() -> dict:
+    setting_map = {
+        "window": "VWAP_WINDOW",
+        "lower_std_mult": "LOWER_STD_MULT",
+        "exit_std_mult": "EXIT_STD_MULT",
+        "strong_exit_std_mult": "STRONG_EXIT_STD_MULT",
+        "trend_window": "TREND_WINDOW",
+    }
+
+    signature = inspect.signature(generate_vwap_signal)
+    kwargs = {}
+
+    for arg_name, setting_name in setting_map.items():
+        if arg_name not in signature.parameters:
+            continue
+
+        param = signature.parameters[arg_name]
+        default = None if param.default is inspect._empty else param.default
+        value = get_setting(setting_name, default)
+        if value is not None:
+            kwargs[arg_name] = value
+
+    return kwargs
+
+
 def run_once():
     global LAST_PROCESSED_CANDLE, CURRENT_POSITION
     global CURRENT_ENTRY_PRICE, CURRENT_STOP_LOSS_PRICE
 
     print("Entered run_once")
 
-    symbol = getattr(settings, "BINANCE_SYMBOL", "BTCUSDT")
-    pair = getattr(settings, "ROOSTOO_PAIR", "BTC/USD")
-    interval = getattr(settings, "INTERVAL", "15m")
-    limit = getattr(settings, "LIMIT", 3000)
-    vwap_window = getattr(settings, "VWAP_WINDOW", 20)
-    lower_std_mult = getattr(settings, "LOWER_STD_MULT", 0.75)
-    strong_exit_std_mult = getattr(settings, "STRONG_EXIT_STD_MULT", 2.0)
-    trend_window = getattr(settings, "TREND_WINDOW", 100)
+    symbol = get_str_setting("BINANCE_SYMBOL", "BTCUSDT")
+    pair = get_str_setting("ROOSTOO_PAIR", "BTC/USD")
+    interval = get_str_setting("INTERVAL", "15m")
+    limit = get_int_setting("LIMIT", 3000)
+    stop_loss_pct = get_stop_loss_pct()
+    top_up_threshold_ratio = get_top_up_threshold_ratio()
+    buy_buffer_ratio = get_buy_buffer_ratio()
+
+    signal_kwargs = build_signal_kwargs()
 
     base_coin, quote_coin = parse_pair(pair)
 
@@ -486,20 +559,9 @@ def run_once():
 
         print("Generating signal...")
         activity_logger.info(
-            "Generating VWAP signal with window={0}, lower_std_mult={1}, strong_exit_std_mult={2}, trend_window={3}".format(
-                vwap_window,
-                lower_std_mult,
-                strong_exit_std_mult,
-                trend_window,
-            )
+            "Generating VWAP signal with kwargs={0}".format(signal_kwargs)
         )
-        df = generate_vwap_signal(
-            df,
-            window=vwap_window,
-            lower_std_mult=lower_std_mult,
-            strong_exit_std_mult=strong_exit_std_mult,
-            trend_window=trend_window,
-        )
+        df = generate_vwap_signal(df, **signal_kwargs)
 
         print("Rows in df:", len(df))
 
@@ -537,8 +599,6 @@ def run_once():
         latest_row = df.iloc[-2]
 
         latest_close = safe_float(latest_row["close"], 0.0)
-        stop_loss_pct = get_stop_loss_pct()
-        top_up_threshold_ratio = get_top_up_threshold_ratio()
         candle_time = str(latest_row["close_time"])
         print("\nLatest closed candle_time =", candle_time)
 
@@ -677,7 +737,7 @@ def run_once():
             available_quote = get_available_quote_balance(quote_coin, balances)
             trade_qty = compute_entry_qty(latest_close, balances, quote_coin)
             target_qty_before_trade = trade_qty
-            estimated_cost = trade_qty * latest_close * BUY_BUFFER_RATIO
+            estimated_cost = trade_qty * latest_close * buy_buffer_ratio
 
             print("Computed BUY qty:", trade_qty)
             print("Estimated BUY cost:", estimated_cost)
@@ -741,7 +801,7 @@ def run_once():
                 target_qty_before_trade > 0
                 and current_base < target_qty_before_trade * top_up_threshold_ratio
             )
-            estimated_cost = trade_qty * latest_close * BUY_BUFFER_RATIO
+            estimated_cost = trade_qty * latest_close * buy_buffer_ratio
 
             print("Current base qty:", current_base)
             print("Target qty:", target_qty_before_trade)
@@ -961,6 +1021,9 @@ def run_once():
                     "stop_loss_price_after_trade": CURRENT_STOP_LOSS_PRICE,
                     "stop_loss_pct": stop_loss_pct,
                     "top_up_threshold_ratio": top_up_threshold_ratio,
+                    "buy_buffer_ratio": buy_buffer_ratio,
+                    "holding_threshold_ratio": get_holding_threshold_ratio(),
+                    "signal_kwargs": signal_kwargs,
                     "vwap": float(latest_row["vwap"]),
                     "lower_band": float(latest_row["lower_band"]),
                     "strong_upper_band": float(latest_row["strong_upper_band"]),
@@ -1009,7 +1072,7 @@ if __name__ == "__main__":
     activity_logger.info("Bot started")
     load_runtime_state()
 
-    poll_seconds = getattr(settings, "POLL_SECONDS", 60)
+    poll_seconds = get_int_setting("POLL_SECONDS", 60)
 
     while True:
         run_once()
