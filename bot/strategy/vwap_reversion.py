@@ -7,6 +7,7 @@ def generate_vwap_signal(
     df: pd.DataFrame,
     window: int = None,
     lower_std_mult: float = None,
+    exit_std_mult: float = None,
     strong_exit_std_mult: float = None,
     trend_window: int = None,
 ) -> pd.DataFrame:
@@ -16,6 +17,8 @@ def generate_vwap_signal(
         window = settings.VWAP_WINDOW
     if lower_std_mult is None:
         lower_std_mult = settings.LOWER_STD_MULT
+    if exit_std_mult is None:
+        exit_std_mult = settings.EXIT_STD_MULT
     if strong_exit_std_mult is None:
         strong_exit_std_mult = settings.STRONG_EXIT_STD_MULT
     if trend_window is None:
@@ -50,12 +53,13 @@ def generate_vwap_signal(
     df["uptrend"] = df["close"] > df["trend_sma"]
 
     df["lower_band"] = df["vwap"] - lower_std_mult * df["std"]
+    df["upper_band"] = df["vwap"] + exit_std_mult * df["std"]
     df["strong_upper_band"] = df["vwap"] + strong_exit_std_mult * df["std"]
 
     entry = df["close"] < df["lower_band"]
     exit_cond = (
         (df["uptrend"] & (df["close"] > df["strong_upper_band"]))
-        | (~df["uptrend"] & (df["close"] > df["vwap"]))
+        | (~df["uptrend"] & (df["close"] > df["upper_band"]))
     )
 
     df["signal"] = np.nan
