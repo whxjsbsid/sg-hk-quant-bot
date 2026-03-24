@@ -45,11 +45,6 @@ def get_min_qty() -> float:
     return max(safe_float(getattr(settings, "MIN_QTY", 0.0), 0.0), 0.0)
 
 
-def get_max_qty() -> float:
-    max_qty = safe_float(getattr(settings, "MAX_QTY", 0.0), 0.0)
-    return max_qty if max_qty > 0 else float("inf")
-
-
 def get_qty_decimals() -> int:
     try:
         return max(int(getattr(settings, "QTY_DECIMALS", 8)), 0)
@@ -59,6 +54,24 @@ def get_qty_decimals() -> int:
 
 def get_sell_buffer_ratio() -> float:
     ratio = safe_float(getattr(settings, "SELL_BUFFER_RATIO", 1.0), 1.0)
+    return min(max(ratio, 0.0), 1.0)
+
+
+def get_close_full_position_on_exit() -> bool:
+    value = getattr(settings, "CLOSE_FULL_POSITION_ON_EXIT", True)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    return bool(value)
+
+
+def get_top_up_threshold_ratio() -> float:
+    ratio = safe_float(getattr(settings, "TOP_UP_THRESHOLD_RATIO", 0.95), 0.95)
     return min(max(ratio, 0.0), 1.0)
 
 
@@ -111,15 +124,20 @@ def compute_metrics(
 def compute_trade_stats(df: pd.DataFrame) -> dict:
     out = df.copy()
 
-    out["position_change"] = out["position"].diff().fillna(out["position"])
-    out["entry"] = out["position_change"] > 0
-    out["exit"] = out["position_change"] < 0
-    out["trade_event"] = out["entry"] | out["exit"]
-
-    entries = int(out["entry"].sum())
-    exits = int(out["exit"].sum())
-    total_orders = entries + exits
-    round_trips = min(entries, exits)
+    if "trade_action" in out.columns:
+        buy_entries = int((out["trade_action"] == "BUY").sum())
+        top_up_buys = int((out["trade_action"] == "BUY_TOPUP").sum())
+        sell_orders = int((out["trade_action"] == "SELL").sum())
+        total_orders = buy_entries + top_up_buys + sell_orders
+        round_trips = min(buy_entries, sell_orders)
+        trade_event_mask = out["trade_action"] != ""
+    else:
+        buy_entries = 0
+        top_up_buys = 0
+        sell_orders = 0
+        total_orders = 0
+        round_trips = 0
+        trade_event_mask = pd.Series(False, index=out.index)
 
     stop_loss_exits = 0
     signal_exits = 0
@@ -127,12 +145,12 @@ def compute_trade_stats(df: pd.DataFrame) -> dict:
         stop_loss_exits = int((out["exit_reason"] == "stop_loss").sum())
         signal_exits = int((out["exit_reason"] == "signal_exit").sum())
 
-    if "open_time" in out.columns:
+    if len(out) > 0 and "open_time" in out.columns:
         out["trade_date"] = pd.to_datetime(out["open_time"]).dt.date
     else:
         out["trade_date"] = pd.RangeIndex(len(out))
 
-    active_days = int(out.loc[out["trade_event"], "trade_date"].nunique()) if total_orders > 0 else 0
+    active_days = int(out.loc[trade_event_mask, "trade_date"].nunique()) if total_orders > 0 else 0
 
     if len(out) > 0 and "open_time" in out.columns:
         start_ts = pd.to_datetime(out["open_time"].iloc[0])
@@ -145,8 +163,9 @@ def compute_trade_stats(df: pd.DataFrame) -> dict:
     orders_per_active_day = total_orders / active_days if active_days > 0 else 0.0
 
     return {
-        "entries": entries,
-        "exits": exits,
+        "entries": buy_entries,
+        "top_up_buys": top_up_buys,
+        "exits": sell_orders,
         "stop_loss_exits": stop_loss_exits,
         "signal_exits": signal_exits,
         "total_orders": total_orders,
@@ -158,6 +177,34 @@ def compute_trade_stats(df: pd.DataFrame) -> dict:
     }
 
 
+def compute_target_qty(total_equity: float, close_price: float) -> float:
+    target_alloc_pct = get_target_alloc_pct()
+    qty_decimals = get_qty_decimals()
+
+    if close_price <= 0:
+        return 0.0
+
+    target_notional = total_equity * target_alloc_pct
+    raw_qty = target_notional / close_price
+    return round_down(raw_qty, qty_decimals)
+
+
+def compute_exit_qty(base_qty: float) -> float:
+    qty_decimals = get_qty_decimals()
+    sell_buffer_ratio = get_sell_buffer_ratio()
+    close_full_position_on_exit = get_close_full_position_on_exit()
+
+    if close_full_position_on_exit:
+        qty = round_down(base_qty, qty_decimals)
+    else:
+        qty = round_down(base_qty * sell_buffer_ratio, qty_decimals)
+
+    if qty <= 0:
+        qty = round_down(base_qty, qty_decimals)
+
+    return min(qty, base_qty)
+
+
 def backtest_vwap_strategy(
     symbol: str,
     interval: str,
@@ -165,6 +212,7 @@ def backtest_vwap_strategy(
     window: int,
     initial_cash: float,
     lower_std_mult: float,
+    exit_std_mult: float,
     strong_exit_std_mult: float,
     trend_window: int,
 ) -> pd.DataFrame:
@@ -174,6 +222,7 @@ def backtest_vwap_strategy(
         df,
         window=window,
         lower_std_mult=lower_std_mult,
+        exit_std_mult=exit_std_mult,
         strong_exit_std_mult=strong_exit_std_mult,
         trend_window=trend_window,
     ).copy()
@@ -181,9 +230,8 @@ def backtest_vwap_strategy(
     target_alloc_pct = get_target_alloc_pct()
     stop_loss_pct = get_stop_loss_pct()
     min_qty = get_min_qty()
-    max_qty = get_max_qty()
     qty_decimals = get_qty_decimals()
-    sell_buffer_ratio = get_sell_buffer_ratio()
+    top_up_threshold_ratio = get_top_up_threshold_ratio()
 
     df["return"] = df["close"].pct_change().fillna(0.0)
     df["buy_and_hold_equity"] = initial_cash * (1 + df["return"]).cumprod()
@@ -204,6 +252,7 @@ def backtest_vwap_strategy(
     stop_loss_price_series = []
     trade_actions = []
     exit_reasons = []
+    target_qty_series = []
 
     prev_signal = 0
 
@@ -211,12 +260,13 @@ def backtest_vwap_strategy(
         close_price = safe_float(row["close"], 0.0)
         latest_signal = int(safe_float(row.get("signal", 0), 0))
 
-        position_before_trade = 1 if base_qty > 0 else 0
+        position_before_trade = 1 if base_qty >= min_qty else 0
         equity_before_trade = cash + (base_qty * close_price)
         strategy_return = 0.0 if prev_equity <= 0 else (equity_before_trade / prev_equity) - 1
 
         trade_action = ""
         exit_reason = ""
+        traded_this_bar = False
 
         if position_before_trade == 1:
             stop_hit = (
@@ -228,41 +278,66 @@ def backtest_vwap_strategy(
             signal_exit = prev_signal == 1 and latest_signal == 0
 
             if stop_hit or signal_exit:
-                sell_qty = round_down(base_qty * sell_buffer_ratio, qty_decimals)
-                if sell_qty <= 0:
-                    sell_qty = round_down(base_qty, qty_decimals)
-                if sell_qty > base_qty:
-                    sell_qty = base_qty
+                sell_qty = compute_exit_qty(base_qty)
 
-                cash += sell_qty * close_price
-                base_qty -= sell_qty
+                if sell_qty > 0:
+                    cash += sell_qty * close_price
+                    base_qty -= sell_qty
 
-                if base_qty < min_qty:
-                    cash += base_qty * close_price
-                    base_qty = 0.0
+                    if base_qty < min_qty:
+                        if base_qty > 0:
+                            cash += base_qty * close_price
+                        base_qty = 0.0
 
-                entry_price = None
-                stop_loss_price = None
-                trade_action = "SELL"
-                exit_reason = "stop_loss" if stop_hit else "signal_exit"
+                    entry_price = None
+                    stop_loss_price = None
+                    trade_action = "SELL"
+                    exit_reason = "stop_loss" if stop_hit else "signal_exit"
+                    traded_this_bar = True
 
-        if base_qty <= 0 and prev_signal == 0 and latest_signal == 1 and close_price > 0:
-            portfolio_value = cash
-            target_notional = portfolio_value * target_alloc_pct
-            buy_qty = round_down(target_notional / close_price, qty_decimals)
-            buy_qty = min(buy_qty, max_qty)
+        current_target_qty = 0.0
+        if close_price > 0:
+            total_equity = cash + (base_qty * close_price)
+            current_target_qty = compute_target_qty(total_equity, close_price)
 
-            if buy_qty >= min_qty:
+        if not traded_this_bar and latest_signal == 1 and close_price > 0:
+            if base_qty < min_qty:
+                buy_qty = current_target_qty
                 buy_cost = buy_qty * close_price
-                if buy_cost <= cash:
+
+                if buy_qty >= min_qty and buy_cost <= cash:
                     cash -= buy_cost
                     base_qty = buy_qty
                     entry_price = close_price
                     stop_loss_price = close_price * (1 - stop_loss_pct) if stop_loss_pct > 0 else None
                     trade_action = "BUY"
-                    exit_reason = ""
+            else:
+                gap_qty = round_down(max(current_target_qty - base_qty, 0.0), qty_decimals)
+                needs_top_up = (
+                    current_target_qty > 0
+                    and base_qty < current_target_qty * top_up_threshold_ratio
+                )
+                buy_cost = gap_qty * close_price
 
-        position_after_trade = 1 if base_qty > 0 else 0
+                if needs_top_up and gap_qty >= min_qty and buy_cost <= cash:
+                    old_base_qty = base_qty
+                    old_entry_price = entry_price if entry_price is not None else close_price
+
+                    cash -= buy_cost
+                    base_qty += gap_qty
+
+                    total_qty = old_base_qty + gap_qty
+                    if total_qty > 0:
+                        entry_price = (
+                            (old_base_qty * old_entry_price) + (gap_qty * close_price)
+                        ) / total_qty
+                    else:
+                        entry_price = close_price
+
+                    stop_loss_price = entry_price * (1 - stop_loss_pct) if stop_loss_pct > 0 else None
+                    trade_action = "BUY_TOPUP"
+
+        position_after_trade = 1 if base_qty >= min_qty else 0
         equity_after_trade = cash + (base_qty * close_price)
 
         strategy_returns.append(strategy_return)
@@ -275,6 +350,7 @@ def backtest_vwap_strategy(
         stop_loss_price_series.append(stop_loss_price if stop_loss_price is not None else np.nan)
         trade_actions.append(trade_action)
         exit_reasons.append(exit_reason)
+        target_qty_series.append(current_target_qty)
 
         prev_equity = equity_after_trade
         prev_signal = latest_signal
@@ -285,6 +361,7 @@ def backtest_vwap_strategy(
     df["base_qty"] = base_qty_series
     df["entry_price"] = entry_price_series
     df["stop_loss_price"] = stop_loss_price_series
+    df["target_qty"] = target_qty_series
     df["trade_action"] = trade_actions
     df["exit_reason"] = exit_reasons
     df["strategy_return"] = pd.Series(strategy_returns, index=df.index)
@@ -313,13 +390,16 @@ def backtest_vwap_strategy(
     print(f"Sample days:            {trade_stats['sample_days']:.2f}")
     print(f"Target allocation:      {target_alloc_pct:.2%}")
     print(f"Stop loss pct:          {stop_loss_pct:.2%}")
+    print(f"Top-up threshold:       {top_up_threshold_ratio:.2%}")
     print()
+
     print(f"Strategy total return:  {strategy_total_return:.2%}")
     print(f"Buy and hold return:    {bh_total_return:.2%}")
     print()
 
     print("Trade frequency")
     print(f"Entries:                {trade_stats['entries']}")
+    print(f"Top-up buys:            {trade_stats['top_up_buys']}")
     print(f"Exits:                  {trade_stats['exits']}")
     print(f"Stop-loss exits:        {trade_stats['stop_loss_exits']}")
     print(f"Signal exits:           {trade_stats['signal_exits']}")
@@ -359,6 +439,7 @@ if __name__ == "__main__":
         window=settings.VWAP_WINDOW,
         initial_cash=settings.INITIAL_CASH,
         lower_std_mult=settings.LOWER_STD_MULT,
+        exit_std_mult=settings.EXIT_STD_MULT,
         strong_exit_std_mult=settings.STRONG_EXIT_STD_MULT,
         trend_window=settings.TREND_WINDOW,
     )
