@@ -1,28 +1,16 @@
 import pandas as pd
 import numpy as np
-from bot.config import settings
 
 
 def generate_vwap_signal(
     df: pd.DataFrame,
-    window: int = None,
-    lower_std_mult: float = None,
-    exit_std_mult: float = None,
-    strong_exit_std_mult: float = None,
-    trend_window: int = None,
+    window: int,
+    lower_std_mult: float,
+    exit_std_mult: float,
+    strong_exit_std_mult: float,
+    trend_window: int,
 ) -> pd.DataFrame:
     df = df.copy()
-
-    if window is None:
-        window = settings.VWAP_WINDOW
-    if lower_std_mult is None:
-        lower_std_mult = settings.LOWER_STD_MULT
-    if exit_std_mult is None:
-        exit_std_mult = settings.EXIT_STD_MULT
-    if strong_exit_std_mult is None:
-        strong_exit_std_mult = settings.STRONG_EXIT_STD_MULT
-    if trend_window is None:
-        trend_window = settings.TREND_WINDOW
 
     if window <= 0:
         raise ValueError("window must be greater than 0")
