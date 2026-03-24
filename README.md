@@ -2,7 +2,7 @@
 
 A long-only quantitative trading bot built for the **SG vs HK University Web3 Quant Hackathon**.
 
-The bot uses **Binance BTC/USDT market data** to generate signals from a **VWAP mean reversion strategy**, then sends **mock market orders** to the **Roostoo mock exchange**. 
+The bot uses **Binance BTC/USDT market data** to generate signals from a **VWAP mean reversion strategy**, then sends **mock market orders** to the **Roostoo mock exchange**.
 
 ---
 
@@ -12,16 +12,16 @@ The bot uses **Binance BTC/USDT market data** to generate signals from a **VWAP 
 This bot trades BTC using a **VWAP mean reversion strategy**. It looks for situations where price deviates below a rolling VWAP-based lower band, then enters long positions in anticipation of a reversion back toward fair value.
 
 ### High-level idea
-This is a **mean reversion** strategy.
+This is a **long-only mean reversion** strategy.
 
 The core idea is:
 - when BTC price falls meaningfully below its recent VWAP range, it may be temporarily undervalued
 - the bot enters a long position when this deviation creates a bullish signal
-- the bot exits when the signal weakens, when price reaches an exit condition, or when stop-loss protection is triggered
+- the bot exits when the signal weakens, when price reaches an exit threshold, or when stop-loss protection is triggered
 
 ### Key features
 - VWAP-based long-only trading logic
-- Dynamic position sizing based on portfolio allocation
+- Dynamic position sizing based on target portfolio allocation
 - Stop-loss risk management
 - Position top-up logic when holdings are below target size
 - Runtime state persistence across restarts
@@ -34,7 +34,7 @@ The core idea is:
 ## 2. Architecture
 
 ### System design
-The bot is structured as a simple modular pipeline:
+The bot is structured as a modular pipeline:
 
 **Binance market data → signal generation → position sizing / risk checks → Roostoo mock execution → logging + runtime state persistence**
 
@@ -51,7 +51,8 @@ Responsible for pulling historical OHLCV candle data from Binance.
 Responsible for computing indicators and signals.
 
 - calculates rolling VWAP
-- computes lower and upper signal bands
+- calculates rolling standard deviation
+- builds entry and exit bands
 - generates long / flat signals based on mean reversion logic
 
 #### Execution module
@@ -74,7 +75,8 @@ Responsible for maintaining continuity across restarts.
 
 - stores last processed candle
 - stores current position state
-- stores entry price and stop-loss price
+- stores entry price
+- stores stop-loss price
 
 ### Tech stack used
 - **Python**
@@ -87,192 +89,122 @@ Responsible for maintaining continuity across restarts.
 
 ## 3. Strategy Explanation
 
-### Entry conditions
-The bot enters a long position when the strategy generates a bullish signal.
+### Signal construction
+The strategy computes:
+- a rolling **VWAP**
+- a rolling **standard deviation of close**
+- a **trend SMA** for trend regime filtering
 
-At a high level:
-- price trades below a VWAP-based lower band
-- the model interprets this as a potential mean reversion opportunity
-- the bot buys BTC when the signal changes from flat to long, or tops up an existing position if it is underweight relative to the target allocation
+The main bands are:
+- **Lower band** = `VWAP - LOWER_STD_MULT × std`
+- **Upper band** = `VWAP + EXIT_STD_MULT × std`
+- **Strong upper band** = `VWAP + STRONG_EXIT_STD_MULT × std`
 
-### Exit conditions
-The bot exits a long position when either of the following happens:
+### Entry condition
+The bot generates a long signal when:
 
-1. **Signal-based exit**  
-   The strategy signal turns from long back to flat.
+- `close < lower_band`
 
-2. **Stop-loss exit**  
-   The latest closed candle falls below the stored stop-loss price.
+This means price has moved sufficiently below rolling VWAP and may revert upward.
 
-This creates two layers of exit logic:
-- strategy-based exit
-- risk-based forced exit
+### Exit condition
+The strategy exits differently depending on whether the market is in an uptrend.
 
-### Risk management rules
-The bot includes explicit risk controls:
+#### Uptrend case
+If:
+- `close > trend_sma`
 
-- **Long-only strategy**  
-  The bot does not short BTC.
+then the strategy treats the market as an uptrend and uses a wider exit threshold:
 
-- **Stop-loss protection**  
-  After a successful buy, the bot stores an entry price and computes a stop-loss price using:
+- exit when `close > strong_upper_band`
 
-  `stop_loss_price = entry_price × (1 - STOP_LOSS_PCT)`
+#### Non-uptrend case
+If:
+- `close <= trend_sma`
 
-- **Closed-candle confirmation**  
-  Stop-loss and signal decisions are evaluated using closed candles rather than intrabar noise.
+then the strategy uses the normal exit threshold:
 
-- **Order size limits**  
-  Position quantities respect configured minimum and maximum size constraints.
+- exit when `close > upper_band`
 
-- **Sell buffering**  
-  A sell buffer ratio can be used to reduce the risk of overselling due to precision or balance mismatch.
+This means the strategy gives trades more room to run in stronger trend conditions, but exits earlier when the broader trend is weaker.
+
+### Signal state
+The signal is long / flat only:
+- `1 = long`
+- `0 = flat`
+
+The bot does **not** short BTC.
+
+### Live trading logic
+The live bot evaluates the **latest closed candle**, not the current unfinished candle.
+
+This is important because:
+- it reduces noise from intrabar moves
+- it avoids acting on incomplete candles
+- it keeps live behaviour more consistent with backtesting
+
+### Stop-loss logic
+In addition to the strategy exit, the bot also applies a stop loss.
+
+After a successful buy, it stores:
+
+- `entry_price`
+- `stop_loss_price = entry_price × (1 - STOP_LOSS_PCT)`
+
+If the latest closed candle falls below the stored stop-loss price, the bot exits the position.
+
+This gives the system two layers of exit logic:
+- **strategy-based exit**
+- **risk-based forced exit**
 
 ### Position sizing logic
-The bot does **not** rely on a fixed quantity per trade. Instead, it sizes positions dynamically using a target portfolio allocation.
+The bot does **not** use a fixed BTC quantity per trade.
 
-The sizing logic works as follows:
-1. estimate available portfolio value
+Instead, it sizes positions dynamically based on a target portfolio allocation:
+
+1. estimate total portfolio equity
 2. compute target notional exposure using `TARGET_ALLOC_PCT`
 3. convert target notional into BTC quantity
-4. round the quantity to valid exchange precision
-5. apply `MIN_QTY` and `MAX_QTY` rules
+4. round the quantity down to valid precision using `QTY_DECIMALS`
+5. ensure the order respects `MIN_QTY`
 
-This means the bot scales its position size with account value instead of always buying a fixed amount like `0.01 BTC`.
+This means the bot scales its position size with account value rather than always buying a fixed amount.
 
 ### Top-up logic
-If the bot is already long and the signal remains bullish, it checks whether the current BTC holdings are below the target allocation.
+If the bot is already long and the signal remains bullish, it checks whether current BTC holdings are below the desired target allocation.
 
-If the current position is below the configured threshold, the bot places a **top-up buy** to bring exposure back toward target size.
+A top-up buy is triggered when current holdings are below the configured threshold:
 
-This is useful when:
-- an old position is smaller than intended
-- previous sells left a residual holding
+- current holdings `< target_qty × TOP_UP_THRESHOLD_RATIO`
+
+This allows the bot to rebalance toward the intended position size when:
+- the account has drifted away from target allocation
+- a prior partial reduction happened
 - the bot restarts while already holding BTC
+
+### Exit execution logic
+On exit, the bot can either:
+- close the full position, or
+- apply a sell buffer if partial reduction is desired
+
+This is controlled by:
+- `CLOSE_FULL_POSITION_ON_EXIT`
+- `SELL_BUFFER_RATIO`
+
+For the hackathon version, full exits are usually the cleanest and safest setup.
 
 ### Assumptions made
 - the strategy is **long-only**
 - Binance candles are used as the source of market truth
 - orders are executed as **mock market orders**
 - execution occurs on **closed candles**, not tick-by-tick intrabar data
-- the backtest is an approximation of live behavior and may not perfectly capture slippage, latency, or partial fill behaviour
+- the backtest is an approximation of live behaviour and does not fully model slippage, latency, fees, or partial fills
 
 ---
 
-## 4. Setup Instructions & How to Run the Bot
+## 4. Configuration
 
-### Prerequisites
-Before running the bot, ensure you have:
-- Python 3.10 or above
-- `pip` installed
-- internet access for Binance market data
-- valid Roostoo mock trading credentials set in your environment if required by your setup
-
-### Step 1: Clone the repository
-
-~~~bash
-git clone <your-repo-url>
-cd sg-hk-quant-bot
-~~~
-
-### Step 2: Install dependencies
-
-~~~bash
-pip install -r requirements.txt
-~~~
-
-### Step 3: Configure the bot
-
-Update the main configuration file at:
-
-~~~bash
-bot/config/settings.py
-~~~
-
-Example configuration:
-
-~~~python
-BINANCE_SYMBOL = "BTCUSDT"
-ROOSTOO_PAIR = "BTC/USD"
-INTERVAL = "15m"
-LIMIT = 3000
-VWAP_WINDOW = 20
-LOWER_STD_MULT = 1.75
-STRONG_EXIT_STD_MULT = 2.5
-TREND_WINDOW = 48
-INITIAL_CASH = 50000
-POLL_SECONDS = 60
-BASE_COIN = "BTC"
-TARGET_ALLOC_PCT = 0.30
-MIN_QTY = 0.001
-MAX_QTY = 10.0
-QTY_DECIMALS = 4
-SELL_BUFFER_RATIO = 0.999
-STOP_LOSS_PCT = 0.05
-TOP_UP_THRESHOLD_RATIO = 0.95
-~~~
-
-If your Roostoo client requires API credentials, export them before running the bot:
-
-~~~bash
-export ROOSTOO_API_KEY=your_key_here
-export ROOSTOO_API_SECRET=your_secret_here
-~~~
-
-### Step 4: Run the live bot
-
-~~~bash
-python3 -m bot.main
-~~~
-
-The live bot will:
-- fetch the latest Binance candles
-- compute VWAP and trading signals
-- check the latest closed candle
-- determine whether to buy, top up, sell, or stop out
-- place mock market orders through Roostoo
-- save runtime state and write logs for monitoring
-
-### Step 5: Run the backtest
-
-~~~bash
-python3 backtest.py
-~~~
-
-The backtest uses historical Binance data and prints key metrics such as:
-- total return
-- buy-and-hold return
-- max drawdown
-- Sharpe ratio
-- Sortino ratio
-- Calmar ratio
-- trade count
-- stop-loss exit count
-
-### Step 6: Runtime files
-
-When the bot runs, it may automatically create:
-- `bot/runtime_state.json` to persist live position state across restarts
-- log files for bot activity and trade history
-
-These files are generated locally during execution and do not need to be manually created.
-
-### Project structure
+All main runtime parameters are stored in:
 
 ```bash
-sg-hk-quant-bot/
-├── bot/
-│   ├── config/
-│   │   └── settings.py
-│   ├── data/
-│   │   └── binance_loader.py
-│   ├── execution/
-│   │   └── roostoo_client.py
-│   ├── logs/
-│   │   ├── activity_logger.py
-│   │   └── trade_logger.py
-│   ├── strategy/
-│   │   └── vwap_reversion.py
-│   └── main.py
-├── backtest.py
-└── README.md
+bot/config/settings.py
