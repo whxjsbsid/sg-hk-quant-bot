@@ -6,21 +6,21 @@ MARKETS = [
         "roostoo_pair": "BTC/USD",
         "base_coin": "BTC",
         "quote_coin": "USD",
-        "target_alloc_pct": 0.25,
+        "target_alloc_pct": 0.30,
     },
     {
         "binance_symbol": "ETHUSDT",
         "roostoo_pair": "ETH/USD",
         "base_coin": "ETH",
         "quote_coin": "USD",
-        "target_alloc_pct": 0.25,
+        "target_alloc_pct": 0.20,
     },
     {
         "binance_symbol": "SOLUSDT",
         "roostoo_pair": "SOL/USD",
         "base_coin": "SOL",
         "quote_coin": "USD",
-        "target_alloc_pct": 0.25,
+        "target_alloc_pct": 0.20,
     },
 ]
 
@@ -29,7 +29,7 @@ LIMIT = 3000
 POLL_SECONDS = 60
 
 VWAP_WINDOW = 20
-LOWER_STD_MULT = 1.75
+LOWER_STD_MULT = 1.5
 EXIT_STD_MULT = 1.25
 STRONG_EXIT_STD_MULT = 2.75
 TREND_WINDOW = 48
