@@ -6,21 +6,21 @@ MARKETS = [
         "roostoo_pair": "BTC/USD",
         "base_coin": "BTC",
         "quote_coin": "USD",
-        "target_alloc_pct": 0.30,
+        "target_alloc_pct": 0.50,
     },
     {
         "binance_symbol": "ETHUSDT",
         "roostoo_pair": "ETH/USD",
         "base_coin": "ETH",
         "quote_coin": "USD",
-        "target_alloc_pct": 0.20,
+        "target_alloc_pct": 0.50,
     },
     {
         "binance_symbol": "SOLUSDT",
         "roostoo_pair": "SOL/USD",
         "base_coin": "SOL",
         "quote_coin": "USD",
-        "target_alloc_pct": 0.20,
+        "target_alloc_pct": 0.0,
     },
 ]
 
