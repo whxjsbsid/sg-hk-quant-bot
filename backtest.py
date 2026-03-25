@@ -1,4 +1,6 @@
+import inspect
 import math
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
@@ -10,6 +12,8 @@ from bot.strategy.vwap_reversion import generate_vwap_signal
 
 def safe_float(value, default: float = 0.0) -> float:
     try:
+        if value is None or value == "":
+            return default
         return float(value)
     except (TypeError, ValueError):
         return default
@@ -31,34 +35,31 @@ def get_periods_per_year(interval: str) -> int:
     return mapping.get(interval, 365)
 
 
-def get_target_alloc_pct() -> float:
-    pct = safe_float(getattr(settings, "TARGET_ALLOC_PCT", 1.0), 1.0)
-    return min(max(pct, 0.0), 1.0)
+def get_setting(name: str, default=None):
+    return getattr(settings, name, default)
 
 
-def get_stop_loss_pct() -> float:
-    pct = safe_float(getattr(settings, "STOP_LOSS_PCT", 0.0), 0.0)
-    return max(pct, 0.0)
+def get_str_setting(name: str, default: str) -> str:
+    value = get_setting(name, default)
+    if value is None:
+        return default
+    return str(value)
 
 
-def get_min_qty() -> float:
-    return max(safe_float(getattr(settings, "MIN_QTY", 0.0), 0.0), 0.0)
-
-
-def get_qty_decimals() -> int:
+def get_int_setting(name: str, default: int) -> int:
+    value = get_setting(name, default)
     try:
-        return max(int(getattr(settings, "QTY_DECIMALS", 8)), 0)
+        return int(value)
     except (TypeError, ValueError):
-        return 8
+        return default
 
 
-def get_sell_buffer_ratio() -> float:
-    ratio = safe_float(getattr(settings, "SELL_BUFFER_RATIO", 1.0), 1.0)
-    return min(max(ratio, 0.0), 1.0)
+def get_float_setting(name: str, default: float) -> float:
+    return safe_float(get_setting(name, default), default)
 
 
-def get_close_full_position_on_exit() -> bool:
-    value = getattr(settings, "CLOSE_FULL_POSITION_ON_EXIT", True)
+def get_bool_setting(name: str, default: bool) -> bool:
+    value = get_setting(name, default)
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -70,9 +71,96 @@ def get_close_full_position_on_exit() -> bool:
     return bool(value)
 
 
-def get_top_up_threshold_ratio() -> float:
-    ratio = safe_float(getattr(settings, "TOP_UP_THRESHOLD_RATIO", 0.95), 0.95)
+def get_markets() -> List[dict]:
+    markets = get_setting("MARKETS", [])
+    if not isinstance(markets, list) or len(markets) == 0:
+        raise ValueError("settings.MARKETS must be a non-empty list.")
+    return markets
+
+
+def normalize_market(market: dict) -> dict:
+    pair = str(market["roostoo_pair"]).strip().upper()
+    base_coin = str(market["base_coin"]).strip().upper()
+
+    if "quote_coin" in market and market["quote_coin"] not in (None, ""):
+        quote_coin = str(market["quote_coin"]).strip().upper()
+    elif "/" in pair:
+        _, quote_coin = pair.split("/", 1)
+        quote_coin = quote_coin.strip().upper()
+    else:
+        quote_coin = "USD"
+
+    return {
+        "market_key": pair,
+        "binance_symbol": str(market["binance_symbol"]).strip().upper(),
+        "roostoo_pair": pair,
+        "base_coin": base_coin,
+        "quote_coin": quote_coin,
+        "target_alloc_pct": max(safe_float(market.get("target_alloc_pct"), 0.0), 0.0),
+    }
+
+
+def get_initial_cash() -> float:
+    return max(get_float_setting("INITIAL_CASH", 0.0), 0.0)
+
+
+def get_stop_loss_pct() -> float:
+    return max(get_float_setting("STOP_LOSS_PCT", 0.0), 0.0)
+
+
+def get_min_qty() -> float:
+    return max(get_float_setting("MIN_QTY", 0.0), 0.0)
+
+
+def get_qty_decimals() -> int:
+    value = get_int_setting("QTY_DECIMALS", 8)
+    return max(value, 0)
+
+
+def get_sell_buffer_ratio() -> float:
+    ratio = get_float_setting("SELL_BUFFER_RATIO", 1.0)
     return min(max(ratio, 0.0), 1.0)
+
+
+def get_close_full_position_on_exit() -> bool:
+    return get_bool_setting("CLOSE_FULL_POSITION_ON_EXIT", True)
+
+
+def get_top_up_threshold_ratio() -> float:
+    ratio = get_float_setting("TOP_UP_THRESHOLD_RATIO", 0.95)
+    return min(max(ratio, 0.0), 1.0)
+
+
+def get_interval() -> str:
+    return get_str_setting("INTERVAL", "15m")
+
+
+def get_limit() -> int:
+    return get_int_setting("LIMIT", 3000)
+
+
+def get_signal_kwargs() -> dict:
+    setting_map = {
+        "window": "VWAP_WINDOW",
+        "lower_std_mult": "LOWER_STD_MULT",
+        "exit_std_mult": "EXIT_STD_MULT",
+        "strong_exit_std_mult": "STRONG_EXIT_STD_MULT",
+        "trend_window": "TREND_WINDOW",
+    }
+
+    signature = inspect.signature(generate_vwap_signal)
+    kwargs = {}
+
+    for arg_name, setting_name in setting_map.items():
+        if arg_name not in signature.parameters:
+            continue
+        param = signature.parameters[arg_name]
+        default = None if param.default is inspect._empty else param.default
+        value = get_setting(setting_name, default)
+        if value is not None:
+            kwargs[arg_name] = value
+
+    return kwargs
 
 
 def compute_metrics(
@@ -121,42 +209,32 @@ def compute_metrics(
     }
 
 
-def compute_trade_stats(df: pd.DataFrame) -> dict:
-    out = df.copy()
+def compute_trade_stats(
+    trade_action_series: pd.Series,
+    exit_reason_series: pd.Series,
+    time_series: pd.Series,
+) -> dict:
+    actions = trade_action_series.fillna("")
+    exits = exit_reason_series.fillna("")
 
-    if "trade_action" in out.columns:
-        buy_entries = int((out["trade_action"] == "BUY").sum())
-        top_up_buys = int((out["trade_action"] == "BUY_TOPUP").sum())
-        sell_orders = int((out["trade_action"] == "SELL").sum())
-        total_orders = buy_entries + top_up_buys + sell_orders
-        round_trips = min(buy_entries, sell_orders)
-        trade_event_mask = out["trade_action"] != ""
-    else:
-        buy_entries = 0
-        top_up_buys = 0
-        sell_orders = 0
-        total_orders = 0
-        round_trips = 0
-        trade_event_mask = pd.Series(False, index=out.index)
+    buy_entries = int((actions == "BUY").sum())
+    top_up_buys = int((actions == "BUY_TOPUP").sum())
+    sell_orders = int((actions == "SELL").sum())
+    total_orders = buy_entries + top_up_buys + sell_orders
+    round_trips = min(buy_entries, sell_orders)
 
-    stop_loss_exits = 0
-    signal_exits = 0
-    if "exit_reason" in out.columns:
-        stop_loss_exits = int((out["exit_reason"] == "stop_loss").sum())
-        signal_exits = int((out["exit_reason"] == "signal_exit").sum())
+    stop_loss_exits = int((exits == "stop_loss").sum())
+    signal_exits = int((exits == "signal_exit").sum())
 
-    if len(out) > 0 and "open_time" in out.columns:
-        out["trade_date"] = pd.to_datetime(out["open_time"]).dt.date
-    else:
-        out["trade_date"] = pd.RangeIndex(len(out))
+    if len(time_series) > 0:
+        trade_dates = pd.to_datetime(time_series).dt.date
+        active_days = int(trade_dates[actions != ""].nunique()) if total_orders > 0 else 0
 
-    active_days = int(out.loc[trade_event_mask, "trade_date"].nunique()) if total_orders > 0 else 0
-
-    if len(out) > 0 and "open_time" in out.columns:
-        start_ts = pd.to_datetime(out["open_time"].iloc[0])
-        end_ts = pd.to_datetime(out["open_time"].iloc[-1])
+        start_ts = pd.to_datetime(time_series.iloc[0])
+        end_ts = pd.to_datetime(time_series.iloc[-1])
         sample_days = max((end_ts - start_ts).total_seconds() / 86400, 1e-9)
     else:
+        active_days = 0
         sample_days = 0.0
 
     orders_per_day_all = total_orders / sample_days if sample_days > 0 else 0.0
@@ -177,20 +255,33 @@ def compute_trade_stats(df: pd.DataFrame) -> dict:
     }
 
 
-def compute_target_qty(total_equity: float, close_price: float) -> float:
-    target_alloc_pct = get_target_alloc_pct()
-    qty_decimals = get_qty_decimals()
+def compute_total_equity(cash: float, market_states: Dict[str, dict], current_prices: Dict[str, float]) -> float:
+    total_equity = cash
+    for market_key, state in market_states.items():
+        total_equity += safe_float(state["base_qty"], 0.0) * safe_float(current_prices.get(market_key), 0.0)
+    return total_equity
 
-    if close_price <= 0:
+
+def compute_target_qty(total_equity: float, close_price: float, target_alloc_pct: float) -> float:
+    qty_decimals = get_qty_decimals()
+    min_qty = get_min_qty()
+
+    if close_price <= 0 or total_equity <= 0 or target_alloc_pct <= 0:
         return 0.0
 
     target_notional = total_equity * target_alloc_pct
     raw_qty = target_notional / close_price
-    return round_down(raw_qty, qty_decimals)
+    qty = round_down(raw_qty, qty_decimals)
+
+    if qty < min_qty:
+        return 0.0
+
+    return qty
 
 
 def compute_exit_qty(base_qty: float) -> float:
     qty_decimals = get_qty_decimals()
+    min_qty = get_min_qty()
     sell_buffer_ratio = get_sell_buffer_ratio()
     close_full_position_on_exit = get_close_full_position_on_exit()
 
@@ -202,193 +293,358 @@ def compute_exit_qty(base_qty: float) -> float:
     if qty <= 0:
         qty = round_down(base_qty, qty_decimals)
 
+    if qty < min_qty:
+        return 0.0
+
     return min(qty, base_qty)
 
 
-def backtest_vwap_strategy(
-    symbol: str,
-    interval: str,
-    limit: int,
-    window: int,
-    initial_cash: float,
-    lower_std_mult: float,
-    exit_std_mult: float,
-    strong_exit_std_mult: float,
-    trend_window: int,
-) -> pd.DataFrame:
-    df = load_binance_klines(symbol=symbol, interval=interval, limit=limit)
+def add_time_key(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "open_time" in out.columns:
+        out["time_key"] = pd.to_datetime(out["open_time"])
+    elif "close_time" in out.columns:
+        out["time_key"] = pd.to_datetime(out["close_time"])
+    else:
+        out["time_key"] = pd.RangeIndex(len(out))
+    return out
 
-    df = generate_vwap_signal(
-        df,
-        window=window,
-        lower_std_mult=lower_std_mult,
-        exit_std_mult=exit_std_mult,
-        strong_exit_std_mult=strong_exit_std_mult,
-        trend_window=trend_window,
-    ).copy()
 
-    target_alloc_pct = get_target_alloc_pct()
+def load_market_frames(markets: List[dict], signal_kwargs: dict) -> Dict[str, pd.DataFrame]:
+    interval = get_interval()
+    limit = get_limit()
+    frames = {}
+
+    for market in markets:
+        symbol = market["binance_symbol"]
+        pair = market["roostoo_pair"]
+
+        df = load_binance_klines(symbol=symbol, interval=interval, limit=limit)
+        df = generate_vwap_signal(df, **signal_kwargs).copy()
+        df = add_time_key(df)
+
+        required_cols = [
+            "time_key",
+            "close",
+            "signal",
+            "vwap",
+            "lower_band",
+            "upper_band",
+            "strong_upper_band",
+        ]
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required columns for {pair}: {missing_cols}")
+
+        df = df.dropna(subset=["time_key", "close", "signal"]).sort_values("time_key").reset_index(drop=True)
+        frames[market["market_key"]] = df
+
+    return frames
+
+
+def align_market_frames(frames: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+    common_times = None
+    for df in frames.values():
+        current_times = set(df["time_key"].tolist())
+        common_times = current_times if common_times is None else common_times & current_times
+
+    if not common_times:
+        raise ValueError("No overlapping timestamps across configured markets.")
+
+    aligned = {}
+    common_times = sorted(common_times)
+    for market_key, df in frames.items():
+        out = df[df["time_key"].isin(common_times)].copy()
+        out = out.sort_values("time_key").reset_index(drop=True)
+        aligned[market_key] = out
+
+    lengths = {market_key: len(df) for market_key, df in aligned.items()}
+    unique_lengths = set(lengths.values())
+    if len(unique_lengths) != 1:
+        raise ValueError(f"Aligned market lengths do not match: {lengths}")
+
+    return aligned
+
+
+def initialize_buy_and_hold(markets: List[dict], frames: Dict[str, pd.DataFrame], initial_cash: float):
+    cash = initial_cash
+    qtys = {}
+
+    for market in markets:
+        market_key = market["market_key"]
+        first_price = safe_float(frames[market_key].iloc[0]["close"], 0.0)
+        target_alloc_pct = market["target_alloc_pct"]
+        qty = compute_target_qty(initial_cash, first_price, target_alloc_pct)
+        cost = qty * first_price
+
+        if cost > cash:
+            affordable_qty = round_down(cash / first_price, get_qty_decimals()) if first_price > 0 else 0.0
+            qty = max(affordable_qty, 0.0)
+            cost = qty * first_price
+
+        cash -= cost
+        qtys[market_key] = qty
+
+    return cash, qtys
+
+
+def backtest_multi_coin_vwap_strategy() -> pd.DataFrame:
+    markets = [normalize_market(market) for market in get_markets()]
+    initial_cash = get_initial_cash()
     stop_loss_pct = get_stop_loss_pct()
     min_qty = get_min_qty()
     qty_decimals = get_qty_decimals()
     top_up_threshold_ratio = get_top_up_threshold_ratio()
+    interval = get_interval()
+    signal_kwargs = get_signal_kwargs()
 
-    df["return"] = df["close"].pct_change().fillna(0.0)
-    df["buy_and_hold_equity"] = initial_cash * (1 + df["return"]).cumprod()
+    total_target_alloc = sum(market["target_alloc_pct"] for market in markets)
+    if total_target_alloc > 1.0 + 1e-9:
+        raise ValueError(
+            f"Sum of target_alloc_pct across MARKETS is {total_target_alloc:.4f}, which is above 1.0."
+        )
 
-    cash = safe_float(initial_cash, 0.0)
-    base_qty = 0.0
-    entry_price = None
-    stop_loss_price = None
-    prev_equity = cash
+    quote_coins = {market["quote_coin"] for market in markets}
+    if len(quote_coins) > 1:
+        raise ValueError("This backtest assumes all configured markets share the same quote coin.")
 
-    strategy_returns = []
-    strategy_equity = []
-    positions_before_trade = []
-    positions_after_trade = []
-    cash_series = []
-    base_qty_series = []
-    entry_price_series = []
-    stop_loss_price_series = []
-    trade_actions = []
-    exit_reasons = []
-    target_qty_series = []
+    frames = load_market_frames(markets, signal_kwargs)
+    frames = align_market_frames(frames)
 
-    prev_signal = 0
+    n_rows = len(next(iter(frames.values())))
+    if n_rows == 0:
+        raise ValueError("No aligned rows available for backtesting.")
 
-    for _, row in df.iterrows():
-        close_price = safe_float(row["close"], 0.0)
-        latest_signal = int(safe_float(row.get("signal", 0), 0))
+    market_states = {
+        market["market_key"]: {
+            "base_qty": 0.0,
+            "entry_price": None,
+            "stop_loss_price": None,
+            "prev_signal": 0,
+        }
+        for market in markets
+    }
 
-        position_before_trade = 1 if base_qty >= min_qty else 0
-        equity_before_trade = cash + (base_qty * close_price)
-        strategy_return = 0.0 if prev_equity <= 0 else (equity_before_trade / prev_equity) - 1
+    bh_cash, bh_qtys = initialize_buy_and_hold(markets, frames, initial_cash)
 
-        trade_action = ""
-        exit_reason = ""
-        traded_this_bar = False
+    cash = initial_cash
+    prev_equity = initial_cash
+    portfolio_rows = []
 
-        if position_before_trade == 1:
-            stop_hit = (
-                stop_loss_price is not None
-                and stop_loss_pct > 0
-                and close_price > 0
-                and close_price <= stop_loss_price
-            )
-            signal_exit = prev_signal == 1 and latest_signal == 0
+    for i in range(n_rows):
+        time_key = next(iter(frames.values())).iloc[i]["time_key"]
+        current_prices = {
+            market["market_key"]: safe_float(frames[market["market_key"]].iloc[i]["close"], 0.0)
+            for market in markets
+        }
 
-            if stop_hit or signal_exit:
-                sell_qty = compute_exit_qty(base_qty)
+        row_out = {
+            "time_key": time_key,
+        }
 
-                if sell_qty > 0:
-                    cash += sell_qty * close_price
-                    base_qty -= sell_qty
+        for market in markets:
+            market_key = market["market_key"]
+            base_coin = market["base_coin"]
+            row = frames[market_key].iloc[i]
+            close_price = safe_float(row["close"], 0.0)
+            latest_signal = int(safe_float(row.get("signal", 0), 0))
+            state = market_states[market_key]
 
-                    if base_qty < min_qty:
-                        if base_qty > 0:
-                            cash += base_qty * close_price
-                        base_qty = 0.0
+            base_qty = safe_float(state["base_qty"], 0.0)
+            entry_price = state["entry_price"]
+            stop_loss_price = state["stop_loss_price"]
+            prev_signal = int(state["prev_signal"])
+            target_alloc_pct = market["target_alloc_pct"]
 
-                    entry_price = None
-                    stop_loss_price = None
-                    trade_action = "SELL"
-                    exit_reason = "stop_loss" if stop_hit else "signal_exit"
-                    traded_this_bar = True
+            position_before_trade = 1 if base_qty >= min_qty else 0
+            trade_action = ""
+            exit_reason = ""
+            target_qty = 0.0
+            traded_this_bar = False
 
-        current_target_qty = 0.0
-        if close_price > 0:
-            total_equity = cash + (base_qty * close_price)
-            current_target_qty = compute_target_qty(total_equity, close_price)
-
-        if not traded_this_bar and latest_signal == 1 and close_price > 0:
-            if base_qty < min_qty:
-                buy_qty = current_target_qty
-                buy_cost = buy_qty * close_price
-
-                if buy_qty >= min_qty and buy_cost <= cash:
-                    cash -= buy_cost
-                    base_qty = buy_qty
-                    entry_price = close_price
-                    stop_loss_price = close_price * (1 - stop_loss_pct) if stop_loss_pct > 0 else None
-                    trade_action = "BUY"
-            else:
-                gap_qty = round_down(max(current_target_qty - base_qty, 0.0), qty_decimals)
-                needs_top_up = (
-                    current_target_qty > 0
-                    and base_qty < current_target_qty * top_up_threshold_ratio
+            if position_before_trade == 1:
+                stop_hit = (
+                    stop_loss_price is not None
+                    and stop_loss_pct > 0
+                    and close_price > 0
+                    and close_price <= stop_loss_price
                 )
-                buy_cost = gap_qty * close_price
+                signal_exit = prev_signal == 1 and latest_signal == 0
 
-                if needs_top_up and gap_qty >= min_qty and buy_cost <= cash:
-                    old_base_qty = base_qty
-                    old_entry_price = entry_price if entry_price is not None else close_price
+                if stop_hit or signal_exit:
+                    sell_qty = compute_exit_qty(base_qty)
+                    if sell_qty > 0:
+                        cash += sell_qty * close_price
+                        base_qty -= sell_qty
 
-                    cash -= buy_cost
-                    base_qty += gap_qty
+                        if base_qty < min_qty:
+                            if base_qty > 0:
+                                cash += base_qty * close_price
+                            base_qty = 0.0
 
-                    total_qty = old_base_qty + gap_qty
-                    if total_qty > 0:
-                        entry_price = (
-                            (old_base_qty * old_entry_price) + (gap_qty * close_price)
-                        ) / total_qty
-                    else:
+                        entry_price = None
+                        stop_loss_price = None
+                        trade_action = "SELL"
+                        exit_reason = "stop_loss" if stop_hit else "signal_exit"
+                        traded_this_bar = True
+
+            total_equity_now = compute_total_equity(
+                cash=cash,
+                market_states={
+                    **market_states,
+                    market_key: {
+                        **market_states[market_key],
+                        "base_qty": base_qty,
+                    },
+                },
+                current_prices=current_prices,
+            )
+            target_qty = compute_target_qty(total_equity_now, close_price, target_alloc_pct)
+
+            if not traded_this_bar and latest_signal == 1 and close_price > 0:
+                if base_qty < min_qty:
+                    buy_qty = target_qty
+                    buy_cost = buy_qty * close_price
+
+                    if buy_qty >= min_qty and buy_cost <= cash:
+                        cash -= buy_cost
+                        base_qty = buy_qty
                         entry_price = close_price
+                        stop_loss_price = close_price * (1 - stop_loss_pct) if stop_loss_pct > 0 else None
+                        trade_action = "BUY"
+                else:
+                    gap_qty = round_down(max(target_qty - base_qty, 0.0), qty_decimals)
+                    needs_top_up = target_qty > 0 and base_qty < target_qty * top_up_threshold_ratio
+                    buy_cost = gap_qty * close_price
 
-                    stop_loss_price = entry_price * (1 - stop_loss_pct) if stop_loss_pct > 0 else None
-                    trade_action = "BUY_TOPUP"
+                    if needs_top_up and gap_qty >= min_qty and buy_cost <= cash:
+                        old_base_qty = base_qty
+                        old_entry_price = entry_price if entry_price is not None else close_price
 
-        position_after_trade = 1 if base_qty >= min_qty else 0
-        equity_after_trade = cash + (base_qty * close_price)
+                        cash -= buy_cost
+                        base_qty += gap_qty
 
-        strategy_returns.append(strategy_return)
-        strategy_equity.append(equity_after_trade)
-        positions_before_trade.append(position_before_trade)
-        positions_after_trade.append(position_after_trade)
-        cash_series.append(cash)
-        base_qty_series.append(base_qty)
-        entry_price_series.append(entry_price if entry_price is not None else np.nan)
-        stop_loss_price_series.append(stop_loss_price if stop_loss_price is not None else np.nan)
-        trade_actions.append(trade_action)
-        exit_reasons.append(exit_reason)
-        target_qty_series.append(current_target_qty)
+                        total_qty = old_base_qty + gap_qty
+                        if total_qty > 0:
+                            entry_price = (
+                                (old_base_qty * old_entry_price) + (gap_qty * close_price)
+                            ) / total_qty
+                        else:
+                            entry_price = close_price
 
-        prev_equity = equity_after_trade
-        prev_signal = latest_signal
+                        stop_loss_price = entry_price * (1 - stop_loss_pct) if stop_loss_pct > 0 else None
+                        trade_action = "BUY_TOPUP"
 
-    df["position_before_trade"] = positions_before_trade
-    df["position"] = positions_after_trade
-    df["cash"] = cash_series
-    df["base_qty"] = base_qty_series
-    df["entry_price"] = entry_price_series
-    df["stop_loss_price"] = stop_loss_price_series
-    df["target_qty"] = target_qty_series
-    df["trade_action"] = trade_actions
-    df["exit_reason"] = exit_reasons
-    df["strategy_return"] = pd.Series(strategy_returns, index=df.index)
-    df["strategy_equity"] = pd.Series(strategy_equity, index=df.index)
+            position_after_trade = 1 if base_qty >= min_qty else 0
 
-    strategy_total_return = df["strategy_equity"].iloc[-1] / initial_cash - 1
-    bh_total_return = df["buy_and_hold_equity"].iloc[-1] / initial_cash - 1
+            market_states[market_key] = {
+                "base_qty": base_qty,
+                "entry_price": entry_price,
+                "stop_loss_price": stop_loss_price,
+                "prev_signal": latest_signal,
+            }
 
+            row_out[f"{base_coin}_close"] = close_price
+            row_out[f"{base_coin}_signal"] = latest_signal
+            row_out[f"{base_coin}_position_before_trade"] = position_before_trade
+            row_out[f"{base_coin}_position"] = position_after_trade
+            row_out[f"{base_coin}_base_qty"] = base_qty
+            row_out[f"{base_coin}_entry_price"] = entry_price if entry_price is not None else np.nan
+            row_out[f"{base_coin}_stop_loss_price"] = stop_loss_price if stop_loss_price is not None else np.nan
+            row_out[f"{base_coin}_target_qty"] = target_qty
+            row_out[f"{base_coin}_trade_action"] = trade_action
+            row_out[f"{base_coin}_exit_reason"] = exit_reason
+            row_out[f"{base_coin}_vwap"] = safe_float(row.get("vwap"), np.nan)
+            row_out[f"{base_coin}_lower_band"] = safe_float(row.get("lower_band"), np.nan)
+            row_out[f"{base_coin}_upper_band"] = safe_float(row.get("upper_band"), np.nan)
+            row_out[f"{base_coin}_strong_upper_band"] = safe_float(row.get("strong_upper_band"), np.nan)
+
+        portfolio_equity = compute_total_equity(cash, market_states, current_prices)
+        portfolio_return = 0.0 if prev_equity <= 0 else (portfolio_equity / prev_equity) - 1
+
+        buy_and_hold_equity = bh_cash
+        for market in markets:
+            market_key = market["market_key"]
+            buy_and_hold_equity += bh_qtys[market_key] * current_prices[market_key]
+
+        row_out["cash"] = cash
+        row_out["strategy_equity"] = portfolio_equity
+        row_out["strategy_return"] = portfolio_return
+        row_out["buy_and_hold_equity"] = buy_and_hold_equity
+
+        portfolio_rows.append(row_out)
+        prev_equity = portfolio_equity
+
+    portfolio_df = pd.DataFrame(portfolio_rows)
+
+    strategy_total_return = portfolio_df["strategy_equity"].iloc[-1] / initial_cash - 1
+    bh_total_return = portfolio_df["buy_and_hold_equity"].iloc[-1] / initial_cash - 1
     periods_per_year = get_periods_per_year(interval)
 
     strategy_metrics = compute_metrics(
-        df["strategy_return"],
-        df["strategy_equity"],
+        portfolio_df["strategy_return"],
+        portfolio_df["strategy_equity"],
         periods_per_year=periods_per_year,
     )
+    bh_returns = portfolio_df["buy_and_hold_equity"].pct_change().fillna(0.0)
     bh_metrics = compute_metrics(
-        df["return"],
-        df["buy_and_hold_equity"],
+        bh_returns,
+        portfolio_df["buy_and_hold_equity"],
         periods_per_year=periods_per_year,
     )
 
-    trade_stats = compute_trade_stats(df)
+    overall_actions = pd.Series("", index=portfolio_df.index)
+    overall_exit_reasons = pd.Series("", index=portfolio_df.index)
+    for market in markets:
+        base_coin = market["base_coin"]
+        actions = portfolio_df[f"{base_coin}_trade_action"].fillna("")
+        exits = portfolio_df[f"{base_coin}_exit_reason"].fillna("")
+        overall_actions = overall_actions.mask(actions != "", actions)
+        overall_exit_reasons = overall_exit_reasons.mask(exits != "", exits)
+
+    overall_trade_stats = compute_trade_stats(
+        overall_actions,
+        overall_exit_reasons,
+        portfolio_df["time_key"],
+    )
+    overall_trade_stats["total_orders"] = int(
+        sum((portfolio_df[f"{market['base_coin']}_trade_action"] != "").sum() for market in markets)
+    )
+    overall_trade_stats["entries"] = int(
+        sum((portfolio_df[f"{market['base_coin']}_trade_action"] == "BUY").sum() for market in markets)
+    )
+    overall_trade_stats["top_up_buys"] = int(
+        sum((portfolio_df[f"{market['base_coin']}_trade_action"] == "BUY_TOPUP").sum() for market in markets)
+    )
+    overall_trade_stats["exits"] = int(
+        sum((portfolio_df[f"{market['base_coin']}_trade_action"] == "SELL").sum() for market in markets)
+    )
+    overall_trade_stats["stop_loss_exits"] = int(
+        sum((portfolio_df[f"{market['base_coin']}_exit_reason"] == "stop_loss").sum() for market in markets)
+    )
+    overall_trade_stats["signal_exits"] = int(
+        sum((portfolio_df[f"{market['base_coin']}_exit_reason"] == "signal_exit").sum() for market in markets)
+    )
+    overall_trade_stats["round_trips"] = min(
+        overall_trade_stats["entries"], overall_trade_stats["exits"]
+    )
+    overall_trade_stats["orders_per_day_all"] = (
+        overall_trade_stats["total_orders"] / overall_trade_stats["sample_days"]
+        if overall_trade_stats["sample_days"] > 0
+        else 0.0
+    )
+    overall_trade_stats["orders_per_active_day"] = (
+        overall_trade_stats["total_orders"] / overall_trade_stats["active_days"]
+        if overall_trade_stats["active_days"] > 0
+        else 0.0
+    )
 
     print(f"Backtest interval:      {interval}")
-    print(f"Bars loaded:            {len(df)}")
-    print(f"Sample days:            {trade_stats['sample_days']:.2f}")
-    print(f"Target allocation:      {target_alloc_pct:.2%}")
+    print(f"Markets:                {', '.join(market['roostoo_pair'] for market in markets)}")
+    print(f"Bars loaded:            {len(portfolio_df)}")
+    print(f"Sample days:            {overall_trade_stats['sample_days']:.2f}")
+    print(f"Initial cash:           {initial_cash:,.2f}")
+    print(f"Total target alloc:     {total_target_alloc:.2%}")
     print(f"Stop loss pct:          {stop_loss_pct:.2%}")
     print(f"Top-up threshold:       {top_up_threshold_ratio:.2%}")
     print()
@@ -397,17 +653,17 @@ def backtest_vwap_strategy(
     print(f"Buy and hold return:    {bh_total_return:.2%}")
     print()
 
-    print("Trade frequency")
-    print(f"Entries:                {trade_stats['entries']}")
-    print(f"Top-up buys:            {trade_stats['top_up_buys']}")
-    print(f"Exits:                  {trade_stats['exits']}")
-    print(f"Stop-loss exits:        {trade_stats['stop_loss_exits']}")
-    print(f"Signal exits:           {trade_stats['signal_exits']}")
-    print(f"Total orders:           {trade_stats['total_orders']}")
-    print(f"Completed round trips:  {trade_stats['round_trips']}")
-    print(f"Active trading days:    {trade_stats['active_days']}")
-    print(f"Orders / day:           {trade_stats['orders_per_day_all']:.2f}")
-    print(f"Orders / active day:    {trade_stats['orders_per_active_day']:.2f}")
+    print("Overall trade frequency")
+    print(f"Entries:                {overall_trade_stats['entries']}")
+    print(f"Top-up buys:            {overall_trade_stats['top_up_buys']}")
+    print(f"Exits:                  {overall_trade_stats['exits']}")
+    print(f"Stop-loss exits:        {overall_trade_stats['stop_loss_exits']}")
+    print(f"Signal exits:           {overall_trade_stats['signal_exits']}")
+    print(f"Total orders:           {overall_trade_stats['total_orders']}")
+    print(f"Completed round trips:  {overall_trade_stats['round_trips']}")
+    print(f"Active trading days:    {overall_trade_stats['active_days']}")
+    print(f"Orders / day:           {overall_trade_stats['orders_per_day_all']:.2f}")
+    print(f"Orders / active day:    {overall_trade_stats['orders_per_active_day']:.2f}")
     print()
 
     print("Strategy metrics")
@@ -428,18 +684,20 @@ def backtest_vwap_strategy(
     print(f"Annual Return:          {bh_metrics['annual_return']:.2%}")
     print()
 
-    return df
+    print("Per-market trade stats")
+    for market in markets:
+        base_coin = market["base_coin"]
+        stats = compute_trade_stats(
+            portfolio_df[f"{base_coin}_trade_action"],
+            portfolio_df[f"{base_coin}_exit_reason"],
+            portfolio_df["time_key"],
+        )
+        print(f"{market['roostoo_pair']} | alloc={market['target_alloc_pct']:.2%} | "
+              f"entries={stats['entries']} | topups={stats['top_up_buys']} | exits={stats['exits']} | "
+              f"stoploss={stats['stop_loss_exits']} | signal_exits={stats['signal_exits']}")
+
+    return portfolio_df
 
 
 if __name__ == "__main__":
-    df_result = backtest_vwap_strategy(
-        symbol=settings.BINANCE_SYMBOL,
-        interval=settings.INTERVAL,
-        limit=settings.LIMIT,
-        window=settings.VWAP_WINDOW,
-        initial_cash=settings.INITIAL_CASH,
-        lower_std_mult=settings.LOWER_STD_MULT,
-        exit_std_mult=settings.EXIT_STD_MULT,
-        strong_exit_std_mult=settings.STRONG_EXIT_STD_MULT,
-        trend_window=settings.TREND_WINDOW,
-    )
+    df_result = backtest_multi_coin_vwap_strategy()
