@@ -2,7 +2,7 @@
 
 A long-only quantitative trading bot built for the **SG vs HK University Web3 Quant Hackathon**.
 
-The system uses **Binance market data** to generate **VWAP mean reversion signals** and sends **mock market orders** to the **Roostoo mock exchange**. It now supports **multiple coins** in one portfolio, with **per-coin target allocations** such as BTC 25%, ETH 25%, and SOL 25%.
+The system uses **Binance market data** to generate **VWAP mean reversion signals** and sends **mock market orders** to the **Roostoo mock exchange**. It supports **multiple coins** in one portfolio, with **per-coin target allocations** such as BTC 25%, ETH 25%, and SOL 25%.
 
 ---
 
