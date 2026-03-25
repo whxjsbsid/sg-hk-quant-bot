@@ -457,19 +457,7 @@ This helps prevent:
 
 ---
 
-## 13. Why the Design Scores Well for Technical Review
-
-This repository is designed to perform well under technical review because it emphasizes:
-
-- **clear strategy logic**: entry, exit, sizing, and risk rules are explicit
-- **clean structure**: config, strategy, execution, and utilities are separated
-- **maintainability**: parameters are centralized and logging is structured
-- **runnability**: install, environment, and execution steps are easy to follow
-- **traceability**: trade decisions can be audited from logs and saved state
-
----
-
-## 14. Future Improvements
+## 13. Future Improvements
 
 Possible next improvements include:
 - volatility-adjusted allocation sizing
@@ -481,14 +469,3 @@ Possible next improvements include:
 
 ---
 
-## 15. Submission Notes
-
-For hackathon review, the most important ideas to communicate are:
-
-1. the strategy is simple, coherent, and intentional
-2. the codebase is modular and maintainable
-3. the bot is fully runnable with clear setup instructions
-4. the risk controls are explicit
-5. the backtest and live system follow the same core logic
-
-This README is written to make those points immediately visible during technical screening.
