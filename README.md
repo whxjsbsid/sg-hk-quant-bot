@@ -372,25 +372,48 @@ When running live, the bot should:
 
 ## 10. Backtesting Approach
 
-The backtest uses the **same strategy logic** as the live system wherever possible.
+The backtest simulates the strategy across all configured markets using historical Binance candles loaded through `load_binance_klines()` and the same `generate_vwap_signal()` function used by the strategy module. Each market is first processed individually, then all markets are aligned to their overlapping timestamps so the portfolio is evaluated on a shared time index.
 
-This is important because it reduces mismatch between:
-- live decision rules
-- historical simulation rules
+### What the backtest does
+For each bar, the backtest:
+- reads the latest close and signal for every configured market
+- tracks a shared cash pool and per-market base-coin holdings
+- computes total portfolio equity as cash plus marked-to-market positions
+- sizes each market using its `target_alloc_pct`
+- enters when the signal is `1` and no position is open
+- tops up when the signal stays long and holdings fall below the target threshold
+- exits when stop loss is hit or when the signal changes from `1` to `0`
 
-### Backtest outputs typically include
-- total return
-- trade count
-- win rate
-- drawdown metrics
-- per-trade logs
-- portfolio equity curve
+### Position and exit behaviour
+The backtest is long-only and manages each market independently within one shared portfolio.
 
-### Why this matters
-A clean submission should demonstrate that:
-- the strategy is logically coherent
-- backtest and live logic are aligned
-- risk management is explicit rather than implied
+- **Entry:** buy up to target size when signal = `1`
+- **Top-up:** add to an existing position if current quantity is below `target_qty × TOP_UP_THRESHOLD_RATIO`
+- **Signal exit:** sell when the previous signal was `1` and the latest signal becomes `0`
+- **Stop-loss exit:** sell when price falls to or below the stored stop-loss price
+- **Exit sizing:** either closes the full position or applies a sell buffer, depending on settings
+
+### Buy-and-hold benchmark
+The script also creates a buy-and-hold benchmark using the same configured markets and target allocations. It buys each market at the first aligned close, then holds throughout the sample period. This allows the strategy equity curve to be compared directly against a passive benchmark.
+
+### Metrics reported by the script
+At the end of the run, the backtest prints:
+- interval, configured markets, and number of bars loaded
+- sample length in days
+- initial cash, total target allocation, stop-loss percentage, and top-up threshold
+- strategy total return and buy-and-hold return
+- overall trade frequency statistics
+- strategy Sharpe, Sortino, Calmar, composite score, max drawdown, and annual return
+- buy-and-hold Sharpe, Sortino, Calmar, composite score, max drawdown, and annual return
+- per-market trade statistics such as entries, top-ups, exits, and stop-loss exits
+
+### Backtest output dataframe
+The returned dataframe stores both portfolio-level and per-market information. This includes:
+- `time_key`
+- `cash`, `strategy_equity`, `strategy_return`, `buy_and_hold_equity`
+- per-market close, signal, position state, quantity, entry price, stop-loss price, target quantity, trade action, exit reason, and indicator bands
+
+This makes it easy to inspect how the portfolio evolved over time and audit each trading decision.
 
 ---
 
