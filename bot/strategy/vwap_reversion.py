@@ -1,5 +1,21 @@
-import pandas as pd
+# bot/strategies/vwap_reversion.py
+
 import numpy as np
+import pandas as pd
+
+
+REQUIRED_COLUMNS = ["open", "high", "low", "close", "volume"]
+
+
+def _validate_inputs(df: pd.DataFrame, window: int, trend_window: int) -> None:
+    if window <= 0:
+        raise ValueError("window must be greater than 0")
+    if trend_window <= 0:
+        raise ValueError("trend_window must be greater than 0")
+
+    missing_cols = [col for col in REQUIRED_COLUMNS if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns: {missing_cols}")
 
 
 def generate_vwap_signal(
@@ -10,49 +26,45 @@ def generate_vwap_signal(
     strong_exit_std_mult: float,
     trend_window: int,
 ) -> pd.DataFrame:
-    df = df.copy()
+    _validate_inputs(df, window, trend_window)
 
-    if window <= 0:
-        raise ValueError("window must be greater than 0")
-    if trend_window <= 0:
-        raise ValueError("trend_window must be greater than 0")
+    signal_df = df.copy()
 
-    required_cols = ["open", "high", "low", "close", "volume"]
-    missing_cols = [col for col in required_cols if col not in df.columns]
-    if missing_cols:
-        raise ValueError(f"Missing required columns: {missing_cols}")
+    if "open_time" in signal_df.columns:
+        signal_df = signal_df.sort_values("open_time").reset_index(drop=True)
 
-    if "open_time" in df.columns:
-        df = df.sort_values("open_time").reset_index(drop=True)
+    signal_df["typical_price"] = (
+        signal_df["high"] + signal_df["low"] + signal_df["close"]
+    ) / 3
 
-    df["typical_price"] = (df["high"] + df["low"] + df["close"]) / 3
+    price_volume = signal_df["typical_price"] * signal_df["volume"]
+    rolling_price_volume = price_volume.rolling(window=window, min_periods=window).sum()
+    rolling_volume = signal_df["volume"].rolling(window=window, min_periods=window).sum()
 
-    pv = df["typical_price"] * df["volume"]
-    rolling_pv = pv.rolling(window=window, min_periods=window).sum()
-    rolling_vol = df["volume"].rolling(window=window, min_periods=window).sum()
+    signal_df["vwap"] = rolling_price_volume / rolling_volume.replace(0, np.nan)
+    signal_df["std"] = signal_df["close"].rolling(window=window, min_periods=window).std()
 
-    df["vwap"] = rolling_pv / rolling_vol.replace(0, np.nan)
-    df["std"] = df["close"].rolling(window=window, min_periods=window).std()
-
-    df["trend_sma"] = df["close"].rolling(
+    signal_df["trend_sma"] = signal_df["close"].rolling(
         window=trend_window,
         min_periods=trend_window,
     ).mean()
-    df["uptrend"] = df["close"] > df["trend_sma"]
+    signal_df["uptrend"] = signal_df["close"] > signal_df["trend_sma"]
 
-    df["lower_band"] = df["vwap"] - lower_std_mult * df["std"]
-    df["upper_band"] = df["vwap"] + exit_std_mult * df["std"]
-    df["strong_upper_band"] = df["vwap"] + strong_exit_std_mult * df["std"]
-
-    entry = df["close"] < df["lower_band"]
-    exit_cond = (
-        (df["uptrend"] & (df["close"] > df["strong_upper_band"]))
-        | (~df["uptrend"] & (df["close"] > df["upper_band"]))
+    signal_df["lower_band"] = signal_df["vwap"] - lower_std_mult * signal_df["std"]
+    signal_df["upper_band"] = signal_df["vwap"] + exit_std_mult * signal_df["std"]
+    signal_df["strong_upper_band"] = (
+        signal_df["vwap"] + strong_exit_std_mult * signal_df["std"]
     )
 
-    df["signal"] = np.nan
-    df.loc[entry, "signal"] = 1
-    df.loc[exit_cond, "signal"] = 0
-    df["signal"] = df["signal"].ffill().fillna(0).astype(int)
+    entry_mask = signal_df["close"] < signal_df["lower_band"]
+    exit_mask = (
+        (signal_df["uptrend"] & (signal_df["close"] > signal_df["strong_upper_band"]))
+        | (~signal_df["uptrend"] & (signal_df["close"] > signal_df["upper_band"]))
+    )
 
-    return df
+    signal_df["signal"] = np.nan
+    signal_df.loc[entry_mask, "signal"] = 1
+    signal_df.loc[exit_mask, "signal"] = 0
+    signal_df["signal"] = signal_df["signal"].ffill().fillna(0).astype(int)
+
+    return signal_df
