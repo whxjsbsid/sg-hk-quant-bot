@@ -1,15 +1,13 @@
+# bot/strategy/main.py
+
 import inspect
 import json
 import math
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from dotenv import load_dotenv
-
-load_dotenv()
-
-print("bot.main started")
 
 from bot.config import settings
 from bot.data.binance_loader import load_binance_klines
@@ -19,27 +17,27 @@ from bot.logs.trade_logger import TradeLogger
 from bot.strategy.vwap_reversion import generate_vwap_signal
 
 
+load_dotenv()
+
 client = RoostooClient()
 trade_logger = TradeLogger()
 activity_logger = setup_activity_logger()
 
-RUNTIME_STATE = {}
+RUNTIME_STATE: dict[str, dict[str, Any]] = {}
 
 
-def get_setting(name: str, default=None):
+def get_setting(name: str, default: Any = None) -> Any:
     return getattr(settings, name, default)
 
 
 def get_str_setting(name: str, default: str) -> str:
     value = get_setting(name, default)
-    if value is None:
-        return default
-    return str(value)
+    return default if value is None else str(value)
 
 
-def safe_float(value, default: float = 0.0) -> float:
+def safe_float(value: Any, default: float = 0.0) -> float:
     try:
-        if value is None or value == "":
+        if value in (None, ""):
             return default
         return float(value)
     except (TypeError, ValueError):
@@ -60,33 +58,41 @@ def get_int_setting(name: str, default: int) -> int:
 
 def get_bool_setting(name: str, default: bool) -> bool:
     value = get_setting(name, default)
+
     if isinstance(value, bool):
         return value
+
     if isinstance(value, str):
         normalized = value.strip().lower()
         if normalized in {"1", "true", "yes", "y", "on"}:
             return True
         if normalized in {"0", "false", "no", "n", "off"}:
             return False
+
     return bool(value)
+
+
+def log_message(message: str, level: str = "info") -> None:
+    print(message)
+    getattr(activity_logger, level)(message)
 
 
 def get_state_file() -> Path:
     return Path(get_str_setting("RUNTIME_STATE_FILE", "bot/runtime_state.json"))
 
 
-def get_markets() -> list:
+def get_markets() -> list[dict[str, Any]]:
     markets = get_setting("MARKETS", [])
-    if not isinstance(markets, list) or len(markets) == 0:
+    if not isinstance(markets, list) or not markets:
         raise ValueError("settings.MARKETS must be a non-empty list.")
     return markets
 
 
-def normalize_market(market: dict) -> dict:
+def normalize_market(market: dict[str, Any]) -> dict[str, Any]:
     pair = str(market["roostoo_pair"]).strip().upper()
     base_coin = str(market["base_coin"]).strip().upper()
 
-    if "quote_coin" in market and market["quote_coin"] not in (None, ""):
+    if market.get("quote_coin") not in (None, ""):
         quote_coin = str(market["quote_coin"]).strip().upper()
     elif "/" in pair:
         _, quote_coin = pair.split("/", 1)
@@ -102,6 +108,10 @@ def normalize_market(market: dict) -> dict:
         "quote_coin": quote_coin,
         "target_alloc_pct": max(safe_float(market.get("target_alloc_pct"), 0.0), 0.0),
     }
+
+
+def get_normalized_markets() -> list[dict[str, Any]]:
+    return [normalize_market(market) for market in get_markets()]
 
 
 def get_min_qty() -> float:
@@ -134,19 +144,17 @@ def get_holding_threshold_ratio() -> float:
 
 
 def round_down(value: float, decimals: int) -> float:
-    if decimals < 0:
-        decimals = 0
-    factor = 10 ** decimals
+    factor = 10 ** max(decimals, 0)
     return math.floor(value * factor) / factor
 
 
-def sanitize_market_state(state: dict) -> dict:
+def sanitize_market_state(state: dict[str, Any]) -> dict[str, Any]:
     current_position = state.get("current_position")
     if current_position not in (0, 1):
         current_position = None
 
-    entry_price = safe_float(state.get("current_entry_price"), default=0.0)
-    stop_loss_price = safe_float(state.get("current_stop_loss_price"), default=0.0)
+    entry_price = safe_float(state.get("current_entry_price"), 0.0)
+    stop_loss_price = safe_float(state.get("current_stop_loss_price"), 0.0)
 
     return {
         "last_processed_candle": state.get("last_processed_candle"),
@@ -156,12 +164,11 @@ def sanitize_market_state(state: dict) -> dict:
     }
 
 
-def get_market_state(market_key: str) -> dict:
-    state = RUNTIME_STATE.get(market_key, {})
-    return sanitize_market_state(state)
+def get_market_state(market_key: str) -> dict[str, Any]:
+    return sanitize_market_state(RUNTIME_STATE.get(market_key, {}))
 
 
-def set_market_state(market_key: str, state: dict) -> None:
+def set_market_state(market_key: str, state: dict[str, Any]) -> None:
     RUNTIME_STATE[market_key] = sanitize_market_state(state)
 
 
@@ -171,10 +178,9 @@ def save_runtime_state() -> None:
 
     try:
         state_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(state_file, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-    except Exception as e:
-        print("Failed to save runtime state:", e)
+        with open(state_file, "w", encoding="utf-8") as file:
+            json.dump(payload, file, indent=2)
+    except Exception:
         activity_logger.exception("Failed to save runtime state")
 
 
@@ -187,10 +193,10 @@ def load_runtime_state() -> None:
         return
 
     try:
-        with open(state_file, "r", encoding="utf-8") as f:
-            loaded = json.load(f)
+        with open(state_file, "r", encoding="utf-8") as file:
+            loaded = json.load(file)
 
-        if isinstance(loaded, dict) and "markets" in loaded and isinstance(loaded["markets"], dict):
+        if isinstance(loaded, dict) and isinstance(loaded.get("markets"), dict):
             raw_states = loaded["markets"]
         elif isinstance(loaded, dict) and any(
             key in loaded
@@ -201,7 +207,7 @@ def load_runtime_state() -> None:
                 "current_stop_loss_price",
             }
         ):
-            first_market = normalize_market(get_markets()[0])
+            first_market = get_normalized_markets()[0]
             raw_states = {first_market["market_key"]: loaded}
         elif isinstance(loaded, dict):
             raw_states = loaded
@@ -212,17 +218,32 @@ def load_runtime_state() -> None:
             str(market_key): sanitize_market_state(state if isinstance(state, dict) else {})
             for market_key, state in raw_states.items()
         }
-
-        print("Loaded runtime state:", RUNTIME_STATE)
-        activity_logger.info("Loaded runtime state: {0}".format(RUNTIME_STATE))
-
-    except Exception as e:
-        print("Failed to load runtime state:", e)
+        log_message(f"Loaded runtime state: {RUNTIME_STATE}")
+    except Exception:
         activity_logger.exception("Failed to load runtime state")
         RUNTIME_STATE = {}
 
 
-def find_first_value(obj, key_names: set):
+def save_market_progress(
+    market_key: str,
+    candle_time: str,
+    current_position: Optional[int],
+    current_entry_price: Optional[float],
+    current_stop_loss_price: Optional[float],
+) -> None:
+    set_market_state(
+        market_key,
+        {
+            "last_processed_candle": candle_time,
+            "current_position": current_position,
+            "current_entry_price": current_entry_price,
+            "current_stop_loss_price": current_stop_loss_price,
+        },
+    )
+    save_runtime_state()
+
+
+def find_first_value(obj: Any, key_names: set[str]) -> Any:
     if isinstance(obj, dict):
         for key, value in obj.items():
             if str(key).lower() in key_names and value not in (None, ""):
@@ -231,40 +252,27 @@ def find_first_value(obj, key_names: set):
             found = find_first_value(value, key_names)
             if found not in (None, ""):
                 return found
-    elif isinstance(obj, list):
+
+    if isinstance(obj, list):
         for item in obj:
             found = find_first_value(item, key_names)
             if found not in (None, ""):
                 return found
+
     return None
 
 
-def extract_order_id(obj) -> str:
-    value = find_first_value(
-        obj,
-        {
-            "orderid",
-            "order_id",
-            "id",
-        },
-    )
-    return str(value) if value not in (None, "") else ""
+def extract_order_id(obj: Any) -> str:
+    value = find_first_value(obj, {"orderid", "order_id", "id"})
+    return "" if value in (None, "") else str(value)
 
 
-def extract_order_status(obj) -> str:
-    value = find_first_value(
-        obj,
-        {
-            "status",
-            "orderstatus",
-            "state",
-            "order_state",
-        },
-    )
-    return str(value).strip().upper() if value not in (None, "") else ""
+def extract_order_status(obj: Any) -> str:
+    value = find_first_value(obj, {"status", "orderstatus", "state", "order_state"})
+    return "" if value in (None, "") else str(value).strip().upper()
 
 
-def extract_fill_price(*objs, fallback: Optional[float] = None) -> Optional[float]:
+def extract_fill_price(*objs: Any, fallback: Optional[float] = None) -> Optional[float]:
     price_keys = {
         "avgprice",
         "averageprice",
@@ -274,19 +282,20 @@ def extract_fill_price(*objs, fallback: Optional[float] = None) -> Optional[floa
         "executedprice",
         "price",
     }
+
     for obj in objs:
         value = find_first_value(obj, price_keys)
-        price = safe_float(value, default=0.0)
+        price = safe_float(value, 0.0)
         if price > 0:
             return price
+
     return fallback
 
 
-def has_explicit_failure(obj) -> bool:
+def has_explicit_failure(obj: Any) -> bool:
     if obj is None:
         return False
 
-    status = extract_order_status(obj)
     failure_statuses = {
         "REJECTED",
         "FAILED",
@@ -295,19 +304,12 @@ def has_explicit_failure(obj) -> bool:
         "ERROR",
         "INVALID",
     }
-    if status in failure_statuses:
+    if extract_order_status(obj) in failure_statuses:
         return True
 
     message_value = find_first_value(
         obj,
-        {
-            "message",
-            "msg",
-            "error",
-            "errormsg",
-            "error_message",
-            "detail",
-        },
+        {"message", "msg", "error", "errormsg", "error_message", "detail"},
     )
     if message_value not in (None, ""):
         message = str(message_value).lower()
@@ -326,17 +328,13 @@ def has_explicit_failure(obj) -> bool:
             return True
 
     success_value = find_first_value(obj, {"success", "ok"})
-    if isinstance(success_value, bool) and success_value is False:
-        return True
-
-    return False
+    return isinstance(success_value, bool) and success_value is False
 
 
-def has_explicit_success(obj) -> bool:
+def has_explicit_success(obj: Any) -> bool:
     if obj is None:
         return False
 
-    status = extract_order_status(obj)
     success_statuses = {
         "FILLED",
         "EXECUTED",
@@ -349,17 +347,14 @@ def has_explicit_success(obj) -> bool:
         "PARTIALLY_FILLED",
         "PARTIAL",
     }
-    if status in success_statuses:
+    if extract_order_status(obj) in success_statuses:
         return True
 
     success_value = find_first_value(obj, {"success", "ok"})
     if isinstance(success_value, bool) and success_value is True:
         return True
 
-    if extract_order_id(obj):
-        return True
-
-    return False
+    return bool(extract_order_id(obj))
 
 
 def log_balances(
@@ -367,38 +362,29 @@ def log_balances(
     quote_coin: str,
     prefix: str = "",
     force_refresh: bool = False,
-) -> dict:
+) -> dict[str, Any]:
     try:
         full_balance = client.get_balance(force_refresh=force_refresh)
-        free_base = safe_float(
-            client.get_free_balance(base_coin, balance_snapshot=full_balance)
-        )
-        free_quote = safe_float(
-            client.get_free_balance(quote_coin, balance_snapshot=full_balance)
-        )
-        free_usd = safe_float(
-            client.get_free_balance("USD", balance_snapshot=full_balance)
-        )
-        free_usdt = safe_float(
-            client.get_free_balance("USDT", balance_snapshot=full_balance)
-        )
+        free_base = safe_float(client.get_free_balance(base_coin, balance_snapshot=full_balance))
+        free_quote = safe_float(client.get_free_balance(quote_coin, balance_snapshot=full_balance))
+        free_usd = safe_float(client.get_free_balance("USD", balance_snapshot=full_balance))
+        free_usdt = safe_float(client.get_free_balance("USDT", balance_snapshot=full_balance))
 
         if prefix:
-            print(prefix)
-            activity_logger.info(prefix)
+            log_message(prefix)
 
         print("Full balance:")
         print(full_balance)
-        print("Free {0} balance: {1}".format(base_coin, free_base))
-        print("Free {0} balance: {1}".format(quote_coin, free_quote))
-        print("Free USD balance:", free_usd)
-        print("Free USDT balance:", free_usdt)
+        print(f"Free {base_coin} balance: {free_base}")
+        print(f"Free {quote_coin} balance: {free_quote}")
+        print(f"Free USD balance: {free_usd}")
+        print(f"Free USDT balance: {free_usdt}")
 
-        activity_logger.info("Full balance: {0}".format(full_balance))
-        activity_logger.info("Free {0} balance: {1}".format(base_coin, free_base))
-        activity_logger.info("Free {0} balance: {1}".format(quote_coin, free_quote))
-        activity_logger.info("Free USD balance: {0}".format(free_usd))
-        activity_logger.info("Free USDT balance: {0}".format(free_usdt))
+        activity_logger.info(f"Full balance: {full_balance}")
+        activity_logger.info(f"Free {base_coin} balance: {free_base}")
+        activity_logger.info(f"Free {quote_coin} balance: {free_quote}")
+        activity_logger.info(f"Free USD balance: {free_usd}")
+        activity_logger.info(f"Free USDT balance: {free_usdt}")
 
         return {
             "full_balance": full_balance,
@@ -407,8 +393,7 @@ def log_balances(
             "free_usd": free_usd,
             "free_usdt": free_usdt,
         }
-    except Exception as e:
-        print("Failed to fetch balances:", e)
+    except Exception:
         activity_logger.exception("Failed to fetch balances")
         return {
             "full_balance": None,
@@ -419,30 +404,29 @@ def log_balances(
         }
 
 
-def require_balance_snapshot(balances: dict, context: str) -> None:
+def require_balance_snapshot(balances: dict[str, Any], context: str) -> None:
     if balances.get("full_balance") is None:
         raise RuntimeError(
-            "Failed to fetch balance during {0}. Check Roostoo API auth before running the bot.".format(context)
+            f"Failed to fetch balance during {context}. "
+            "Check Roostoo API auth before running the bot."
         )
 
 
-def get_available_quote_balance(quote_coin: str, balances: dict) -> float:
+def get_available_quote_balance(quote_coin: str, balances: dict[str, Any]) -> float:
     free_quote = safe_float(balances.get("free_quote"), 0.0)
     free_usd = safe_float(balances.get("free_usd"), 0.0)
     free_usdt = safe_float(balances.get("free_usdt"), 0.0)
 
     if quote_coin == "USD":
         return max(free_quote, free_usd) + free_usdt
-
     if quote_coin == "USDT":
         return max(free_quote, free_usdt)
-
     return free_quote
 
 
 def get_total_portfolio_equity(
-    latest_price_by_base: dict,
-    balances: dict,
+    latest_price_by_base: dict[str, float],
+    balances: dict[str, Any],
     quote_coin: str,
 ) -> float:
     total_equity = get_available_quote_balance(quote_coin, balances)
@@ -451,22 +435,18 @@ def get_total_portfolio_equity(
     if full_balance is None:
         return total_equity
 
-    seen_base_coins = set()
-    for market in get_markets():
-        normalized = normalize_market(market)
-        base_coin = normalized["base_coin"]
-
+    seen_base_coins: set[str] = set()
+    for market in get_normalized_markets():
+        base_coin = market["base_coin"]
         if base_coin in seen_base_coins:
             continue
-        seen_base_coins.add(base_coin)
 
+        seen_base_coins.add(base_coin)
         latest_price = safe_float(latest_price_by_base.get(base_coin), 0.0)
         if latest_price <= 0:
             continue
 
-        free_base = safe_float(
-            client.get_free_balance(base_coin, balance_snapshot=full_balance)
-        )
+        free_base = safe_float(client.get_free_balance(base_coin, balance_snapshot=full_balance))
         total_equity += free_base * latest_price
 
     return total_equity
@@ -477,20 +457,13 @@ def compute_entry_qty(
     total_equity: float,
     target_alloc_pct: float,
 ) -> float:
-    min_qty = get_min_qty()
-    qty_decimals = get_qty_decimals()
-
     if latest_price <= 0 or total_equity <= 0 or target_alloc_pct <= 0:
         return 0.0
 
     target_notional = total_equity * target_alloc_pct
     raw_qty = target_notional / latest_price
-    qty = round_down(raw_qty, qty_decimals)
-
-    if qty < min_qty:
-        return 0.0
-
-    return qty
+    qty = round_down(raw_qty, get_qty_decimals())
+    return qty if qty >= get_min_qty() else 0.0
 
 
 def compute_top_up_qty(
@@ -498,39 +471,25 @@ def compute_top_up_qty(
     current_base: float,
     total_equity: float,
     target_alloc_pct: float,
-):
-    min_qty = get_min_qty()
-    qty_decimals = get_qty_decimals()
-
+) -> tuple[float, float]:
     target_qty = compute_entry_qty(latest_price, total_equity, target_alloc_pct)
-
     if target_qty <= 0:
         return 0.0, target_qty
 
-    gap_qty = round_down(max(target_qty - current_base, 0.0), qty_decimals)
-
-    if gap_qty < min_qty:
+    gap_qty = round_down(max(target_qty - current_base, 0.0), get_qty_decimals())
+    if gap_qty < get_min_qty():
         return 0.0, target_qty
 
     return gap_qty, target_qty
 
 
 def compute_exit_qty(free_base: float) -> float:
-    min_qty = get_min_qty()
-    qty_decimals = get_qty_decimals()
-    sell_buffer_ratio = get_sell_buffer_ratio()
-    close_full_position_on_exit = get_close_full_position_on_exit()
-
-    if close_full_position_on_exit:
-        qty = round_down(free_base, qty_decimals)
+    if get_close_full_position_on_exit():
+        qty = round_down(free_base, get_qty_decimals())
     else:
-        raw_qty = free_base * sell_buffer_ratio
-        qty = round_down(raw_qty, qty_decimals)
+        qty = round_down(free_base * get_sell_buffer_ratio(), get_qty_decimals())
 
-    if qty < min_qty:
-        return 0.0
-
-    return qty
+    return qty if qty >= get_min_qty() else 0.0
 
 
 def infer_position_from_base_balance(free_base: float) -> int:
@@ -538,7 +497,7 @@ def infer_position_from_base_balance(free_base: float) -> int:
     return 1 if free_base >= threshold else 0
 
 
-def query_order_safely(pair: str, order_id: str = ""):
+def query_order_safely(pair: str, order_id: str = "") -> Any:
     try:
         if order_id:
             result = client.query_order(order_id=order_id)
@@ -550,13 +509,12 @@ def query_order_safely(pair: str, order_id: str = ""):
         print("\nOrder ID not found in response. Falling back to pair query:")
         print(result)
         return result
-    except Exception as e:
-        print("Order query failed:", e)
+    except Exception:
         activity_logger.exception("Order query failed")
         return None
 
 
-def build_signal_kwargs() -> dict:
+def build_signal_kwargs() -> dict[str, Any]:
     setting_map = {
         "window": "VWAP_WINDOW",
         "lower_std_mult": "LOWER_STD_MULT",
@@ -566,14 +524,14 @@ def build_signal_kwargs() -> dict:
     }
 
     signature = inspect.signature(generate_vwap_signal)
-    kwargs = {}
+    kwargs: dict[str, Any] = {}
 
     for arg_name, setting_name in setting_map.items():
         if arg_name not in signature.parameters:
             continue
 
-        param = signature.parameters[arg_name]
-        default = None if param.default is inspect._empty else param.default
+        parameter = signature.parameters[arg_name]
+        default = None if parameter.default is inspect._empty else parameter.default
         value = get_setting(setting_name, default)
         if value is not None:
             kwargs[arg_name] = value
@@ -581,7 +539,10 @@ def build_signal_kwargs() -> dict:
     return kwargs
 
 
-def build_market_snapshot(market: dict, signal_kwargs: dict) -> Optional[dict]:
+def build_market_snapshot(
+    market: dict[str, Any],
+    signal_kwargs: dict[str, Any],
+) -> Optional[dict[str, Any]]:
     interval = get_str_setting("INTERVAL", "15m")
     limit = get_int_setting("LIMIT", 3000)
 
@@ -589,29 +550,21 @@ def build_market_snapshot(market: dict, signal_kwargs: dict) -> Optional[dict]:
     pair = market["roostoo_pair"]
 
     print("\n==============================")
-    print("Loading market:", pair)
+    print(f"Loading market: {pair}")
     print("==============================")
 
     activity_logger.info(
-        "Loading Binance data for symbol={0}, interval={1}, limit={2}".format(
-            symbol, interval, limit
-        )
+        f"Loading Binance data for symbol={symbol}, interval={interval}, limit={limit}"
     )
     df = load_binance_klines(symbol=symbol, interval=interval, limit=limit)
 
-    activity_logger.info(
-        "Generating VWAP signal for pair={0} with kwargs={1}".format(
-            pair, signal_kwargs
-        )
-    )
+    activity_logger.info(f"Generating VWAP signal for pair={pair} with kwargs={signal_kwargs}")
     df = generate_vwap_signal(df, **signal_kwargs)
 
-    print("Rows in df for {0}: {1}".format(pair, len(df)))
+    print(f"Rows in df for {pair}: {len(df)}")
 
     if len(df) < 3:
-        msg = "Not enough rows to evaluate closed-candle signal for {0}.".format(pair)
-        print(msg)
-        activity_logger.info(msg)
+        log_message(f"Not enough rows to evaluate closed-candle signal for {pair}.")
         return None
 
     required_cols = [
@@ -624,15 +577,11 @@ def build_market_snapshot(market: dict, signal_kwargs: dict) -> Optional[dict]:
     ]
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
-        msg = "Missing required columns for {0}: {1}".format(pair, missing_cols)
-        print(msg)
-        activity_logger.info(msg)
+        log_message(f"Missing required columns for {pair}: {missing_cols}")
         return None
 
     if df[required_cols].tail(3).isnull().any().any():
-        msg = "Latest rows contain NaN values for {0}. Skipping.".format(pair)
-        print(msg)
-        activity_logger.info(msg)
+        log_message(f"Latest rows contain NaN values for {pair}. Skipping.")
         return None
 
     prev_row = df.iloc[-3]
@@ -643,11 +592,11 @@ def build_market_snapshot(market: dict, signal_kwargs: dict) -> Optional[dict]:
     prev_signal = int(prev_row["signal"])
     latest_signal = int(latest_row["signal"])
 
-    print("\nLatest rows for {0}:".format(pair))
+    print(f"\nLatest rows for {pair}:")
     print(df[required_cols].tail(5))
-    print("Latest closed candle_time =", candle_time)
-    print("prev_signal =", prev_signal)
-    print("latest_signal =", latest_signal)
+    print(f"Latest closed candle_time = {candle_time}")
+    print(f"prev_signal = {prev_signal}")
+    print(f"latest_signal = {latest_signal}")
 
     return {
         "market": market,
@@ -661,7 +610,11 @@ def build_market_snapshot(market: dict, signal_kwargs: dict) -> Optional[dict]:
     }
 
 
-def process_market(snapshot: dict, latest_price_by_base: dict, signal_kwargs: dict) -> None:
+def process_market(
+    snapshot: dict[str, Any],
+    latest_price_by_base: dict[str, float],
+    signal_kwargs: dict[str, Any],
+) -> None:
     market = snapshot["market"]
     pair = market["roostoo_pair"]
     symbol = market["binance_symbol"]
@@ -685,65 +638,58 @@ def process_market(snapshot: dict, latest_price_by_base: dict, signal_kwargs: di
     current_entry_price = state["current_entry_price"]
     current_stop_loss_price = state["current_stop_loss_price"]
 
-    print("\nProcessing market:", pair)
-    print("Stored state:", state)
+    print(f"\nProcessing market: {pair}")
+    print(f"Stored state: {state}")
 
     if state["last_processed_candle"] == candle_time:
-        msg = "Closed candle {0} for {1} already processed. Skipping.".format(
-            candle_time, pair
-        )
-        print(msg)
-        activity_logger.info(msg)
+        log_message(f"Closed candle {candle_time} for {pair} already processed. Skipping.")
         return
 
     if prev_signal not in (0, 1) or latest_signal not in (0, 1):
-        msg = (
-            "Unexpected signal values detected for {0}. "
+        log_message(
+            f"Unexpected signal values detected for {pair}. "
             "This main.py assumes long-only signals: 0 = flat, 1 = long."
-        ).format(pair)
-        print(msg)
-        activity_logger.info(msg)
-        state["last_processed_candle"] = candle_time
-        set_market_state(market_key, state)
-        save_runtime_state()
+        )
+        save_market_progress(
+            market_key,
+            candle_time,
+            current_position,
+            current_entry_price,
+            current_stop_loss_price,
+        )
         return
 
     reconciliation_balances = log_balances(
         base_coin,
         quote_coin,
-        prefix="Checking balances for state reconciliation ({0})...".format(pair),
+        prefix=f"Checking balances for state reconciliation ({pair})...",
         force_refresh=True,
     )
-    require_balance_snapshot(reconciliation_balances, "state reconciliation for {0}".format(pair))
+    require_balance_snapshot(reconciliation_balances, f"state reconciliation for {pair}")
 
     live_base_qty = safe_float(reconciliation_balances.get("free_base"), 0.0)
     live_position = infer_position_from_base_balance(live_base_qty)
 
     if current_position is None:
         current_position = live_position
-        msg = "Initial CURRENT_POSITION for {0} = {1}".format(pair, current_position)
-        print(msg)
-        activity_logger.info(msg)
+        log_message(f"Initial CURRENT_POSITION for {pair} = {current_position}")
     elif current_position != live_position:
-        msg = (
-            "Reconciling CURRENT_POSITION for {0} from runtime state {1} "
-            "to live balance position {2}. live_base_qty={3}"
-        ).format(pair, current_position, live_position, live_base_qty)
-        print(msg)
-        activity_logger.warning(msg)
+        log_message(
+            f"Reconciling CURRENT_POSITION for {pair} from runtime state {current_position} "
+            f"to live balance position {live_position}. live_base_qty={live_base_qty}",
+            level="warning",
+        )
         current_position = live_position
 
     if current_position == 1 and current_entry_price is None and latest_close > 0:
         current_entry_price = latest_close
         current_stop_loss_price = latest_close * (1 - stop_loss_pct)
-
-        msg = (
-            "Position detected for {0} but no saved entry price found. "
+        log_message(
+            f"Position detected for {pair} but no saved entry price found. "
             "Bootstrapping stop loss from latest close. "
-            "entry_price={1}, stop_loss={2}"
-        ).format(pair, current_entry_price, current_stop_loss_price)
-        print(msg)
-        activity_logger.warning(msg)
+            f"entry_price={current_entry_price}, stop_loss={current_stop_loss_price}",
+            level="warning",
+        )
 
     side = None
     signal_reason = None
@@ -761,41 +707,32 @@ def process_market(snapshot: dict, latest_price_by_base: dict, signal_kwargs: di
     ):
         trade_qty = compute_exit_qty(live_base_qty)
 
-        print("Computed STOP-LOSS SELL qty:", trade_qty)
-        print("Free base balance:", live_base_qty)
-        print("Current entry price:", current_entry_price)
-        print("Current stop loss price:", current_stop_loss_price)
-        print("Latest close:", latest_close)
+        print(f"Computed STOP-LOSS SELL qty: {trade_qty}")
+        print(f"Free base balance: {live_base_qty}")
+        print(f"Current entry price: {current_entry_price}")
+        print(f"Current stop loss price: {current_stop_loss_price}")
+        print(f"Latest close: {latest_close}")
 
         activity_logger.info(
-            "STOP-LOSS SELL sizing for {0}: order_qty={1}, free_base={2}, "
-            "entry_price={3}, stop_loss_price={4}, latest_close={5}".format(
-                pair,
-                trade_qty,
-                live_base_qty,
-                current_entry_price,
-                current_stop_loss_price,
-                latest_close,
-            )
+            f"STOP-LOSS SELL sizing for {pair}: order_qty={trade_qty}, "
+            f"free_base={live_base_qty}, entry_price={current_entry_price}, "
+            f"stop_loss_price={current_stop_loss_price}, latest_close={latest_close}"
         )
 
         if trade_qty <= 0:
-            msg = "Skip STOP-LOSS SELL for {0}: computed exit quantity is too small.".format(pair)
-            print(msg)
-            activity_logger.info(msg)
-            state["last_processed_candle"] = candle_time
-            state["current_position"] = current_position
-            state["current_entry_price"] = current_entry_price
-            state["current_stop_loss_price"] = current_stop_loss_price
-            set_market_state(market_key, state)
-            save_runtime_state()
+            log_message(f"Skip STOP-LOSS SELL for {pair}: computed exit quantity is too small.")
+            save_market_progress(
+                market_key,
+                candle_time,
+                current_position,
+                current_entry_price,
+                current_stop_loss_price,
+            )
             return
 
         side = "SELL"
         signal_reason = (
-            "Stop loss hit: latest close {0} <= stop loss {1}".format(
-                latest_close, current_stop_loss_price
-            )
+            f"Stop loss hit: latest close {latest_close} <= stop loss {current_stop_loss_price}"
         )
 
     elif current_position == 0 and latest_signal == 1:
@@ -813,67 +750,60 @@ def process_market(snapshot: dict, latest_price_by_base: dict, signal_kwargs: di
         target_qty_before_trade = trade_qty
         estimated_cost = trade_qty * latest_close
 
-        print("Portfolio total equity:", total_equity_before_trade)
-        print("Target allocation pct:", target_alloc_pct)
-        print("Computed BUY qty:", trade_qty)
-        print("Estimated BUY cost:", estimated_cost)
-        print("Available quote balance:", available_quote)
+        print(f"Portfolio total equity: {total_equity_before_trade}")
+        print(f"Target allocation pct: {target_alloc_pct}")
+        print(f"Computed BUY qty: {trade_qty}")
+        print(f"Estimated BUY cost: {estimated_cost}")
+        print(f"Available quote balance: {available_quote}")
 
         activity_logger.info(
-            "BUY sizing for {0}: total_equity={1}, target_alloc_pct={2}, "
-            "order_qty={3}, estimated_cost={4}, available_quote={5}".format(
-                pair,
-                total_equity_before_trade,
-                target_alloc_pct,
-                trade_qty,
-                estimated_cost,
-                available_quote,
-            )
+            f"BUY sizing for {pair}: total_equity={total_equity_before_trade}, "
+            f"target_alloc_pct={target_alloc_pct}, order_qty={trade_qty}, "
+            f"estimated_cost={estimated_cost}, available_quote={available_quote}"
         )
 
         if latest_close <= 0:
-            msg = "Skip BUY for {0}: invalid latest close price.".format(pair)
-            print(msg)
-            activity_logger.info(msg)
-            state["last_processed_candle"] = candle_time
-            state["current_position"] = current_position
-            state["current_entry_price"] = current_entry_price
-            state["current_stop_loss_price"] = current_stop_loss_price
-            set_market_state(market_key, state)
-            save_runtime_state()
+            log_message(f"Skip BUY for {pair}: invalid latest close price.")
+            save_market_progress(
+                market_key,
+                candle_time,
+                current_position,
+                current_entry_price,
+                current_stop_loss_price,
+            )
             return
 
         if trade_qty <= 0:
-            msg = "Skip BUY for {0}: computed order quantity is too small.".format(pair)
-            print(msg)
-            activity_logger.info(msg)
-            state["last_processed_candle"] = candle_time
-            state["current_position"] = current_position
-            state["current_entry_price"] = current_entry_price
-            state["current_stop_loss_price"] = current_stop_loss_price
-            set_market_state(market_key, state)
-            save_runtime_state()
+            log_message(f"Skip BUY for {pair}: computed order quantity is too small.")
+            save_market_progress(
+                market_key,
+                candle_time,
+                current_position,
+                current_entry_price,
+                current_stop_loss_price,
+            )
             return
 
         if available_quote < estimated_cost:
-            msg = (
-                "Skip BUY for {0}: available quote balance {1} is below estimated cost {2}"
-            ).format(pair, available_quote, estimated_cost)
-            print(msg)
-            activity_logger.info(msg)
-            state["last_processed_candle"] = candle_time
-            state["current_position"] = current_position
-            state["current_entry_price"] = current_entry_price
-            state["current_stop_loss_price"] = current_stop_loss_price
-            set_market_state(market_key, state)
-            save_runtime_state()
+            log_message(
+                f"Skip BUY for {pair}: available quote balance {available_quote} "
+                f"is below estimated cost {estimated_cost}"
+            )
+            save_market_progress(
+                market_key,
+                candle_time,
+                current_position,
+                current_entry_price,
+                current_stop_loss_price,
+            )
             return
 
         side = "BUY"
-        if prev_signal == 0:
-            signal_reason = "Signal flipped from 0 to 1 on latest closed candle"
-        else:
-            signal_reason = "Flat while signal is still 1, buying back to target allocation"
+        signal_reason = (
+            "Signal flipped from 0 to 1 on latest closed candle"
+            if prev_signal == 0
+            else "Flat while signal is still 1, buying back to target allocation"
+        )
 
     elif current_position == 1 and latest_signal == 1:
         available_quote = get_available_quote_balance(quote_coin, reconciliation_balances)
@@ -888,145 +818,128 @@ def process_market(snapshot: dict, latest_price_by_base: dict, signal_kwargs: di
             total_equity=total_equity_before_trade,
             target_alloc_pct=target_alloc_pct,
         )
-
         needs_top_up = (
             target_qty_before_trade > 0
             and live_base_qty < target_qty_before_trade * top_up_threshold_ratio
         )
         estimated_cost = trade_qty * latest_close
 
-        print("Portfolio total equity:", total_equity_before_trade)
-        print("Current base qty:", live_base_qty)
-        print("Target allocation pct:", target_alloc_pct)
-        print("Target qty:", target_qty_before_trade)
-        print("Computed TOP-UP BUY qty:", trade_qty)
-        print("Estimated TOP-UP BUY cost:", estimated_cost)
-        print("Available quote balance:", available_quote)
+        print(f"Portfolio total equity: {total_equity_before_trade}")
+        print(f"Current base qty: {live_base_qty}")
+        print(f"Target allocation pct: {target_alloc_pct}")
+        print(f"Target qty: {target_qty_before_trade}")
+        print(f"Computed TOP-UP BUY qty: {trade_qty}")
+        print(f"Estimated TOP-UP BUY cost: {estimated_cost}")
+        print(f"Available quote balance: {available_quote}")
 
         activity_logger.info(
-            "TOP-UP BUY sizing for {0}: total_equity={1}, target_alloc_pct={2}, "
-            "current_base={3}, target_qty={4}, top_up_qty={5}, estimated_cost={6}, available_quote={7}".format(
-                pair,
-                total_equity_before_trade,
-                target_alloc_pct,
-                live_base_qty,
-                target_qty_before_trade,
-                trade_qty,
-                estimated_cost,
-                available_quote,
-            )
+            f"TOP-UP BUY sizing for {pair}: total_equity={total_equity_before_trade}, "
+            f"target_alloc_pct={target_alloc_pct}, current_base={live_base_qty}, "
+            f"target_qty={target_qty_before_trade}, top_up_qty={trade_qty}, "
+            f"estimated_cost={estimated_cost}, available_quote={available_quote}"
         )
 
         if latest_close <= 0:
-            msg = "Skip TOP-UP BUY for {0}: invalid latest close price.".format(pair)
-            print(msg)
-            activity_logger.info(msg)
-            state["last_processed_candle"] = candle_time
-            state["current_position"] = current_position
-            state["current_entry_price"] = current_entry_price
-            state["current_stop_loss_price"] = current_stop_loss_price
-            set_market_state(market_key, state)
-            save_runtime_state()
+            log_message(f"Skip TOP-UP BUY for {pair}: invalid latest close price.")
+            save_market_progress(
+                market_key,
+                candle_time,
+                current_position,
+                current_entry_price,
+                current_stop_loss_price,
+            )
             return
 
         if not needs_top_up:
-            msg = (
-                "No top-up needed for {0}. current_base={1}, target_qty={2}, threshold_ratio={3}"
-            ).format(pair, live_base_qty, target_qty_before_trade, top_up_threshold_ratio)
-            print(msg)
-            activity_logger.info(msg)
-            state["last_processed_candle"] = candle_time
-            state["current_position"] = current_position
-            state["current_entry_price"] = current_entry_price
-            state["current_stop_loss_price"] = current_stop_loss_price
-            set_market_state(market_key, state)
-            save_runtime_state()
+            log_message(
+                f"No top-up needed for {pair}. current_base={live_base_qty}, "
+                f"target_qty={target_qty_before_trade}, threshold_ratio={top_up_threshold_ratio}"
+            )
+            save_market_progress(
+                market_key,
+                candle_time,
+                current_position,
+                current_entry_price,
+                current_stop_loss_price,
+            )
             return
 
         if trade_qty <= 0:
-            msg = "Skip TOP-UP BUY for {0}: computed top-up quantity is too small.".format(pair)
-            print(msg)
-            activity_logger.info(msg)
-            state["last_processed_candle"] = candle_time
-            state["current_position"] = current_position
-            state["current_entry_price"] = current_entry_price
-            state["current_stop_loss_price"] = current_stop_loss_price
-            set_market_state(market_key, state)
-            save_runtime_state()
+            log_message(f"Skip TOP-UP BUY for {pair}: computed top-up quantity is too small.")
+            save_market_progress(
+                market_key,
+                candle_time,
+                current_position,
+                current_entry_price,
+                current_stop_loss_price,
+            )
             return
 
         if available_quote < estimated_cost:
-            msg = (
-                "Skip TOP-UP BUY for {0}: available quote balance {1} is below estimated cost {2}"
-            ).format(pair, available_quote, estimated_cost)
-            print(msg)
-            activity_logger.info(msg)
-            state["last_processed_candle"] = candle_time
-            state["current_position"] = current_position
-            state["current_entry_price"] = current_entry_price
-            state["current_stop_loss_price"] = current_stop_loss_price
-            set_market_state(market_key, state)
-            save_runtime_state()
+            log_message(
+                f"Skip TOP-UP BUY for {pair}: available quote balance {available_quote} "
+                f"is below estimated cost {estimated_cost}"
+            )
+            save_market_progress(
+                market_key,
+                candle_time,
+                current_position,
+                current_entry_price,
+                current_stop_loss_price,
+            )
             return
 
         side = "BUY"
         buy_was_top_up = True
         signal_reason = (
-            "Top-up buy: current base {0} is below target qty {1}".format(
-                live_base_qty, target_qty_before_trade
-            )
+            f"Top-up buy: current base {live_base_qty} is below target qty {target_qty_before_trade}"
         )
 
     elif current_position == 1 and prev_signal == 1 and latest_signal == 0:
         trade_qty = compute_exit_qty(live_base_qty)
 
-        print("Computed SELL qty:", trade_qty)
-        print("Free base balance:", live_base_qty)
+        print(f"Computed SELL qty: {trade_qty}")
+        print(f"Free base balance: {live_base_qty}")
 
         activity_logger.info(
-            "SELL sizing for {0}: order_qty={1}, free_base={2}".format(
-                pair, trade_qty, live_base_qty
-            )
+            f"SELL sizing for {pair}: order_qty={trade_qty}, free_base={live_base_qty}"
         )
 
         if trade_qty <= 0:
-            msg = "Skip SELL for {0}: computed exit quantity is too small.".format(pair)
-            print(msg)
-            activity_logger.info(msg)
-            state["last_processed_candle"] = candle_time
-            state["current_position"] = current_position
-            state["current_entry_price"] = current_entry_price
-            state["current_stop_loss_price"] = current_stop_loss_price
-            set_market_state(market_key, state)
-            save_runtime_state()
+            log_message(f"Skip SELL for {pair}: computed exit quantity is too small.")
+            save_market_progress(
+                market_key,
+                candle_time,
+                current_position,
+                current_entry_price,
+                current_stop_loss_price,
+            )
             return
 
         side = "SELL"
         signal_reason = "Signal flipped from 1 to 0 on latest closed candle"
 
     if side is None:
-        msg = (
-            "No trade signal for {0} on candle {1}. prev_signal={2}, latest_signal={3}, current_position={4}"
-        ).format(pair, candle_time, prev_signal, latest_signal, current_position)
-        print(msg)
-        activity_logger.info(msg)
-        state["last_processed_candle"] = candle_time
-        state["current_position"] = current_position
-        state["current_entry_price"] = current_entry_price
-        state["current_stop_loss_price"] = current_stop_loss_price
-        set_market_state(market_key, state)
-        save_runtime_state()
+        log_message(
+            f"No trade signal for {pair} on candle {candle_time}. prev_signal={prev_signal}, "
+            f"latest_signal={latest_signal}, current_position={current_position}"
+        )
+        save_market_progress(
+            market_key,
+            candle_time,
+            current_position,
+            current_entry_price,
+            current_stop_loss_price,
+        )
         return
 
     position_before_trade = current_position
     entry_price_before_trade = current_entry_price
     stop_loss_price_before_trade = current_stop_loss_price
 
-    print("\nPlacing {0} order for {1}...".format(side, pair))
+    print(f"\nPlacing {side} order for {pair}...")
     activity_logger.info(
-        "Placing {0} order for pair={1}, quantity={2}, reason={3}".format(
-            side, pair, trade_qty, signal_reason
-        )
+        f"Placing {side} order for pair={pair}, quantity={trade_qty}, reason={signal_reason}"
     )
 
     order_response = client.place_order(
@@ -1045,17 +958,15 @@ def process_market(snapshot: dict, latest_price_by_base: dict, signal_kwargs: di
     post_trade_balances = log_balances(
         base_coin,
         quote_coin,
-        prefix="Balances after order ({0}):".format(pair),
+        prefix=f"Balances after order ({pair}):",
         force_refresh=True,
     )
-    require_balance_snapshot(post_trade_balances, "post-trade balance check for {0}".format(pair))
+    require_balance_snapshot(post_trade_balances, f"post-trade balance check for {pair}")
 
     post_trade_base_qty = safe_float(post_trade_balances["free_base"], 0.0)
     position_after_trade = infer_position_from_base_balance(post_trade_base_qty)
 
-    explicit_failure = has_explicit_failure(order_response) or has_explicit_failure(
-        order_query
-    )
+    explicit_failure = has_explicit_failure(order_response) or has_explicit_failure(order_query)
     explicit_success = (
         has_explicit_success(order_response)
         or has_explicit_success(order_query)
@@ -1075,11 +986,7 @@ def process_market(snapshot: dict, latest_price_by_base: dict, signal_kwargs: di
         else:
             balance_confirms_trade = post_trade_base_qty < pre_trade_base_qty - 1e-12
 
-    order_success = False
-    if balance_confirms_trade:
-        order_success = True
-    elif explicit_success and not explicit_failure:
-        order_success = True
+    order_success = balance_confirms_trade or (explicit_success and not explicit_failure)
 
     actual_trade_price = extract_fill_price(
         order_query,
@@ -1091,9 +998,7 @@ def process_market(snapshot: dict, latest_price_by_base: dict, signal_kwargs: di
     state["last_processed_candle"] = candle_time
 
     if order_success:
-        fill_price_for_state = (
-            actual_trade_price if actual_trade_price is not None else latest_close
-        )
+        fill_price_for_state = actual_trade_price if actual_trade_price is not None else latest_close
 
         if side == "BUY":
             if (
@@ -1162,55 +1067,37 @@ def process_market(snapshot: dict, latest_price_by_base: dict, signal_kwargs: di
         )
 
         activity_logger.info(
-            "Placed {0} order for {1} {2}. order_id={3}, fill_price={4}, reason={5}, "
-            "current_position={6}, last_processed_candle={7}".format(
-                side,
-                trade_qty,
-                pair,
-                order_id,
-                actual_trade_price,
-                signal_reason,
-                position_after_trade,
-                candle_time,
-            )
+            f"Placed {side} order for {trade_qty} {pair}. order_id={order_id}, "
+            f"fill_price={actual_trade_price}, reason={signal_reason}, "
+            f"current_position={position_after_trade}, last_processed_candle={candle_time}"
         )
 
-        print("Updated state for {0}:".format(pair))
+        print(f"Updated state for {pair}:")
         print(get_market_state(market_key))
-    else:
-        state["current_entry_price"] = current_entry_price
-        state["current_stop_loss_price"] = current_stop_loss_price
-        set_market_state(market_key, state)
-        save_runtime_state()
+        return
 
-        msg = (
-            "Order may not have succeeded cleanly for {0}. side={1}, order_id={2}, "
-            "explicit_failure={3}, explicit_success={4}, position_before_trade={5}, "
-            "position_after_trade={6}"
-        ).format(
-            pair,
-            side,
-            order_id,
-            explicit_failure,
-            explicit_success,
-            position_before_trade,
-            position_after_trade,
-        )
-        print(msg)
-        activity_logger.warning(msg)
+    state["current_entry_price"] = current_entry_price
+    state["current_stop_loss_price"] = current_stop_loss_price
+    set_market_state(market_key, state)
+    save_runtime_state()
+
+    log_message(
+        f"Order may not have succeeded cleanly for {pair}. side={side}, order_id={order_id}, "
+        f"explicit_failure={explicit_failure}, explicit_success={explicit_success}, "
+        f"position_before_trade={position_before_trade}, position_after_trade={position_after_trade}",
+        level="warning",
+    )
 
 
-def run_once():
+def run_once() -> None:
     print("Entered run_once")
 
     signal_kwargs = build_signal_kwargs()
-    normalized_markets = [normalize_market(market) for market in get_markets()]
+    normalized_markets = get_normalized_markets()
 
     quote_coins = {market["quote_coin"] for market in normalized_markets}
     if len(quote_coins) > 1:
-        raise ValueError(
-            "This main.py assumes all configured markets share the same quote coin."
-        )
+        raise ValueError("This main.py assumes all configured markets share the same quote coin.")
 
     snapshots = []
     for market in normalized_markets:
@@ -1219,13 +1106,12 @@ def run_once():
             snapshots.append(snapshot)
 
     if not snapshots:
-        msg = "No valid market snapshots available this cycle."
-        print(msg)
-        activity_logger.info(msg)
+        log_message("No valid market snapshots available this cycle.")
         return
 
     latest_price_by_base = {
-        snapshot["market"]["base_coin"]: snapshot["latest_close"] for snapshot in snapshots
+        snapshot["market"]["base_coin"]: snapshot["latest_close"]
+        for snapshot in snapshots
     }
 
     for snapshot in snapshots:
@@ -1245,6 +1131,6 @@ if __name__ == "__main__":
 
     while True:
         run_once()
-        print("Sleeping for {0} seconds...\n".format(poll_seconds))
-        activity_logger.info("Sleeping for {0} seconds".format(poll_seconds))
+        print(f"Sleeping for {poll_seconds} seconds...\n")
+        activity_logger.info(f"Sleeping for {poll_seconds} seconds")
         time.sleep(poll_seconds)
