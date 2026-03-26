@@ -1,10 +1,10 @@
 # bot/data/binance_loader.py
 
-from __future__ import annotations
+import re
 from typing import Any
+
 import pandas as pd
 import requests
-import re
 
 
 BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
@@ -26,7 +26,7 @@ KLINE_COLUMNS = [
     "ignore",
 ]
 
-PRICE_COLUMNS = [
+NUMERIC_COLUMNS = [
     "open",
     "high",
     "low",
@@ -69,15 +69,19 @@ def _fetch_klines_batch(
     if end_time is not None:
         params["endTime"] = end_time
 
-    response = requests.get(BINANCE_KLINES_URL, params=params, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
+    try:
+        response = requests.get(BINANCE_KLINES_URL, params=params, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise RuntimeError(f"Failed to fetch Binance klines for {symbol} ({interval}).") from exc
+
     return response.json()
 
 
 def _to_dataframe(rows: list[list[Any]]) -> pd.DataFrame:
     df = pd.DataFrame(rows, columns=KLINE_COLUMNS)
 
-    for col in PRICE_COLUMNS:
+    for col in NUMERIC_COLUMNS:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     df["number_of_trades"] = pd.to_numeric(df["number_of_trades"], errors="coerce").astype("Int64")
