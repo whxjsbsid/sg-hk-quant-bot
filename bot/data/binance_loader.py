@@ -1,7 +1,7 @@
 # bot/data/binance_loader.py
 
 import re
-from typing import Any
+from typing import Any, List, Optional, Set
 
 import pandas as pd
 import requests
@@ -46,7 +46,7 @@ def interval_to_milliseconds(interval: str) -> int:
     value, unit = match.groups()
     unit_ms = {
         "m": 60 * 1000,
-        "h": 60 * 60 * 1000,
+        "h": 60 * 60 * 60 * 1000 // 60,
         "d": 24 * 60 * 60 * 1000,
         "w": 7 * 24 * 60 * 60 * 1000,
         "M": 30 * 24 * 60 * 60 * 1000,
@@ -58,9 +58,9 @@ def _fetch_klines_batch(
     symbol: str,
     interval: str,
     limit: int,
-    end_time: int | None = None,
-) -> list[list[Any]]:
-    params: dict[str, Any] = {
+    end_time: Optional[int] = None,
+) -> List[List[Any]]:
+    params = {
         "symbol": symbol,
         "interval": interval,
         "limit": limit,
@@ -70,21 +70,30 @@ def _fetch_klines_batch(
         params["endTime"] = end_time
 
     try:
-        response = requests.get(BINANCE_KLINES_URL, params=params, timeout=REQUEST_TIMEOUT)
+        response = requests.get(
+            BINANCE_KLINES_URL,
+            params=params,
+            timeout=REQUEST_TIMEOUT,
+        )
         response.raise_for_status()
     except requests.RequestException as exc:
-        raise RuntimeError(f"Failed to fetch Binance klines for {symbol} ({interval}).") from exc
+        raise RuntimeError(
+            f"Failed to fetch Binance klines for {symbol} ({interval})."
+        ) from exc
 
     return response.json()
 
 
-def _to_dataframe(rows: list[list[Any]]) -> pd.DataFrame:
+def _to_dataframe(rows: List[List[Any]]) -> pd.DataFrame:
     df = pd.DataFrame(rows, columns=KLINE_COLUMNS)
 
     for col in NUMERIC_COLUMNS:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df["number_of_trades"] = pd.to_numeric(df["number_of_trades"], errors="coerce").astype("Int64")
+    df["number_of_trades"] = pd.to_numeric(
+        df["number_of_trades"],
+        errors="coerce",
+    ).astype("Int64")
     df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
     df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
 
@@ -99,9 +108,9 @@ def load_binance_klines(
     if limit <= 0:
         raise ValueError("limit must be greater than 0")
 
-    all_rows: list[list[Any]] = []
-    seen_open_times: set[int] = set()
-    end_time: int | None = None
+    all_rows: List[List[Any]] = []
+    seen_open_times: Set[int] = set()
+    end_time: Optional[int] = None
 
     while len(all_rows) < limit:
         batch_limit = min(limit - len(all_rows), BINANCE_MAX_LIMIT)
