@@ -7,6 +7,7 @@ MARKETS = [
         "base_coin": "BTC",
         "quote_coin": "USD",
         "target_alloc_pct": 0.30,
+        "qty_decimals": 4,
     },
     {
         "binance_symbol": "ETHUSDT",
@@ -14,6 +15,7 @@ MARKETS = [
         "base_coin": "ETH",
         "quote_coin": "USD",
         "target_alloc_pct": 0.30,
+        "qty_decimals": 4,
     },
     {
         "binance_symbol": "SOLUSDT",
@@ -21,6 +23,7 @@ MARKETS = [
         "base_coin": "SOL",
         "quote_coin": "USD",
         "target_alloc_pct": 0.30,
+        "qty_decimals": 3,
     },
 ]
 
@@ -40,7 +43,7 @@ TREND_WINDOW = 48
 INITIAL_CASH = 50_000
 
 MIN_QTY = 0.001
-QTY_DECIMALS = 3
+DEFAULT_QTY_DECIMALS = 3
 
 SELL_BUFFER_RATIO = 0.9999
 STOP_LOSS_PCT = 0.05
