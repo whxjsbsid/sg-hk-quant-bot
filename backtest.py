@@ -1,3 +1,5 @@
+# backtest.py
+
 import inspect
 import math
 from typing import Dict, List
@@ -78,6 +80,18 @@ def get_markets() -> List[dict]:
     return markets
 
 
+def get_default_qty_decimals() -> int:
+    value = get_int_setting("DEFAULT_QTY_DECIMALS", get_int_setting("QTY_DECIMALS", 8))
+    return max(value, 0)
+
+
+def get_market_qty_decimals(market: dict) -> int:
+    try:
+        return max(int(market.get("qty_decimals", get_default_qty_decimals())), 0)
+    except (TypeError, ValueError):
+        return get_default_qty_decimals()
+
+
 def normalize_market(market: dict) -> dict:
     pair = str(market["roostoo_pair"]).strip().upper()
     base_coin = str(market["base_coin"]).strip().upper()
@@ -97,6 +111,7 @@ def normalize_market(market: dict) -> dict:
         "base_coin": base_coin,
         "quote_coin": quote_coin,
         "target_alloc_pct": max(safe_float(market.get("target_alloc_pct"), 0.0), 0.0),
+        "qty_decimals": get_market_qty_decimals(market),
     }
 
 
@@ -110,11 +125,6 @@ def get_stop_loss_pct() -> float:
 
 def get_min_qty() -> float:
     return max(get_float_setting("MIN_QTY", 0.0), 0.0)
-
-
-def get_qty_decimals() -> int:
-    value = get_int_setting("QTY_DECIMALS", 8)
-    return max(value, 0)
 
 
 def get_sell_buffer_ratio() -> float:
@@ -262,8 +272,12 @@ def compute_total_equity(cash: float, market_states: Dict[str, dict], current_pr
     return total_equity
 
 
-def compute_target_qty(total_equity: float, close_price: float, target_alloc_pct: float) -> float:
-    qty_decimals = get_qty_decimals()
+def compute_target_qty(
+    total_equity: float,
+    close_price: float,
+    target_alloc_pct: float,
+    qty_decimals: int,
+) -> float:
     min_qty = get_min_qty()
 
     if close_price <= 0 or total_equity <= 0 or target_alloc_pct <= 0:
@@ -279,8 +293,7 @@ def compute_target_qty(total_equity: float, close_price: float, target_alloc_pct
     return qty
 
 
-def compute_exit_qty(base_qty: float) -> float:
-    qty_decimals = get_qty_decimals()
+def compute_exit_qty(base_qty: float, qty_decimals: int) -> float:
     min_qty = get_min_qty()
     sell_buffer_ratio = get_sell_buffer_ratio()
     close_full_position_on_exit = get_close_full_position_on_exit()
@@ -372,13 +385,14 @@ def initialize_buy_and_hold(markets: List[dict], frames: Dict[str, pd.DataFrame]
 
     for market in markets:
         market_key = market["market_key"]
+        qty_decimals = market["qty_decimals"]
         first_price = safe_float(frames[market_key].iloc[0]["close"], 0.0)
         target_alloc_pct = market["target_alloc_pct"]
-        qty = compute_target_qty(initial_cash, first_price, target_alloc_pct)
+        qty = compute_target_qty(initial_cash, first_price, target_alloc_pct, qty_decimals)
         cost = qty * first_price
 
         if cost > cash:
-            affordable_qty = round_down(cash / first_price, get_qty_decimals()) if first_price > 0 else 0.0
+            affordable_qty = round_down(cash / first_price, qty_decimals) if first_price > 0 else 0.0
             qty = max(affordable_qty, 0.0)
             cost = qty * first_price
 
@@ -393,7 +407,6 @@ def backtest_multi_coin_vwap_strategy() -> pd.DataFrame:
     initial_cash = get_initial_cash()
     stop_loss_pct = get_stop_loss_pct()
     min_qty = get_min_qty()
-    qty_decimals = get_qty_decimals()
     top_up_threshold_ratio = get_top_up_threshold_ratio()
     interval = get_interval()
     signal_kwargs = get_signal_kwargs()
@@ -445,6 +458,7 @@ def backtest_multi_coin_vwap_strategy() -> pd.DataFrame:
         for market in markets:
             market_key = market["market_key"]
             base_coin = market["base_coin"]
+            qty_decimals = market["qty_decimals"]
             row = frames[market_key].iloc[i]
             close_price = safe_float(row["close"], 0.0)
             latest_signal = int(safe_float(row.get("signal", 0), 0))
@@ -472,7 +486,7 @@ def backtest_multi_coin_vwap_strategy() -> pd.DataFrame:
                 signal_exit = prev_signal == 1 and latest_signal == 0
 
                 if stop_hit or signal_exit:
-                    sell_qty = compute_exit_qty(base_qty)
+                    sell_qty = compute_exit_qty(base_qty, qty_decimals)
                     if sell_qty > 0:
                         cash += sell_qty * close_price
                         base_qty -= sell_qty
@@ -499,7 +513,12 @@ def backtest_multi_coin_vwap_strategy() -> pd.DataFrame:
                 },
                 current_prices=current_prices,
             )
-            target_qty = compute_target_qty(total_equity_now, close_price, target_alloc_pct)
+            target_qty = compute_target_qty(
+                total_equity=total_equity_now,
+                close_price=close_price,
+                target_alloc_pct=target_alloc_pct,
+                qty_decimals=qty_decimals,
+            )
 
             if not traded_this_bar and latest_signal == 1 and close_price > 0:
                 if base_qty < min_qty:
