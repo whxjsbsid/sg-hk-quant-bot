@@ -1,11 +1,11 @@
-# bot/strategy/main.py
+# bot/main.py
 
 import inspect
 import json
 import math
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from dotenv import load_dotenv
 
@@ -23,7 +23,7 @@ client = RoostooClient()
 trade_logger = TradeLogger()
 activity_logger = setup_activity_logger()
 
-RUNTIME_STATE: dict[str, dict[str, Any]] = {}
+RUNTIME_STATE: Dict[str, Dict[str, Any]] = {}
 
 
 def get_setting(name: str, default: Any = None) -> Any:
@@ -81,49 +81,30 @@ def get_state_file() -> Path:
     return Path(get_str_setting("RUNTIME_STATE_FILE", "bot/runtime_state.json"))
 
 
-def get_markets() -> list[dict[str, Any]]:
+def get_markets() -> List[Dict[str, Any]]:
     markets = get_setting("MARKETS", [])
     if not isinstance(markets, list) or not markets:
         raise ValueError("settings.MARKETS must be a non-empty list.")
     return markets
 
 
-def normalize_market(market: dict[str, Any]) -> dict[str, Any]:
-    pair = str(market["roostoo_pair"]).strip().upper()
-    base_coin = str(market["base_coin"]).strip().upper()
-
-    if market.get("quote_coin") not in (None, ""):
-        quote_coin = str(market["quote_coin"]).strip().upper()
-    elif "/" in pair:
-        _, quote_coin = pair.split("/", 1)
-        quote_coin = quote_coin.strip().upper()
-    else:
-        quote_coin = "USD"
-
-    return {
-        "market_key": pair,
-        "binance_symbol": str(market["binance_symbol"]).strip().upper(),
-        "roostoo_pair": pair,
-        "base_coin": base_coin,
-        "quote_coin": quote_coin,
-        "target_alloc_pct": max(safe_float(market.get("target_alloc_pct"), 0.0), 0.0),
-    }
-
-
-def get_normalized_markets() -> list[dict[str, Any]]:
-    return [normalize_market(market) for market in get_markets()]
-
-
 def get_min_qty() -> float:
     return get_float_setting("MIN_QTY", 0.001)
 
 
-def get_qty_decimals() -> int:
-    return get_int_setting("QTY_DECIMALS", 4)
+def get_default_qty_decimals() -> int:
+    return get_int_setting("DEFAULT_QTY_DECIMALS", get_int_setting("QTY_DECIMALS", 4))
+
+
+def get_market_qty_decimals(market: Dict[str, Any]) -> int:
+    try:
+        return max(int(market.get("qty_decimals", get_default_qty_decimals())), 0)
+    except (TypeError, ValueError):
+        return get_default_qty_decimals()
 
 
 def get_sell_buffer_ratio() -> float:
-    return get_float_setting("SELL_BUFFER_RATIO", 0.999)
+    return get_float_setting("SELL_BUFFER_RATIO", 0.9999)
 
 
 def get_close_full_position_on_exit() -> bool:
@@ -143,12 +124,39 @@ def get_holding_threshold_ratio() -> float:
     return max(get_float_setting("HOLDING_THRESHOLD_RATIO", 0.80), 0.0)
 
 
+def normalize_market(market: Dict[str, Any]) -> Dict[str, Any]:
+    pair = str(market["roostoo_pair"]).strip().upper()
+    base_coin = str(market["base_coin"]).strip().upper()
+
+    if market.get("quote_coin") not in (None, ""):
+        quote_coin = str(market["quote_coin"]).strip().upper()
+    elif "/" in pair:
+        _, quote_coin = pair.split("/", 1)
+        quote_coin = quote_coin.strip().upper()
+    else:
+        quote_coin = "USD"
+
+    return {
+        "market_key": pair,
+        "binance_symbol": str(market["binance_symbol"]).strip().upper(),
+        "roostoo_pair": pair,
+        "base_coin": base_coin,
+        "quote_coin": quote_coin,
+        "target_alloc_pct": max(safe_float(market.get("target_alloc_pct"), 0.0), 0.0),
+        "qty_decimals": get_market_qty_decimals(market),
+    }
+
+
+def get_normalized_markets() -> List[Dict[str, Any]]:
+    return [normalize_market(market) for market in get_markets()]
+
+
 def round_down(value: float, decimals: int) -> float:
     factor = 10 ** max(decimals, 0)
     return math.floor(value * factor) / factor
 
 
-def sanitize_market_state(state: dict[str, Any]) -> dict[str, Any]:
+def sanitize_market_state(state: Dict[str, Any]) -> Dict[str, Any]:
     current_position = state.get("current_position")
     if current_position not in (0, 1):
         current_position = None
@@ -164,11 +172,11 @@ def sanitize_market_state(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def get_market_state(market_key: str) -> dict[str, Any]:
+def get_market_state(market_key: str) -> Dict[str, Any]:
     return sanitize_market_state(RUNTIME_STATE.get(market_key, {}))
 
 
-def set_market_state(market_key: str, state: dict[str, Any]) -> None:
+def set_market_state(market_key: str, state: Dict[str, Any]) -> None:
     RUNTIME_STATE[market_key] = sanitize_market_state(state)
 
 
@@ -243,7 +251,7 @@ def save_market_progress(
     save_runtime_state()
 
 
-def find_first_value(obj: Any, key_names: set[str]) -> Any:
+def find_first_value(obj: Any, key_names: Set[str]) -> Any:
     if isinstance(obj, dict):
         for key, value in obj.items():
             if str(key).lower() in key_names and value not in (None, ""):
@@ -362,7 +370,7 @@ def log_balances(
     quote_coin: str,
     prefix: str = "",
     force_refresh: bool = False,
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     try:
         full_balance = client.get_balance(force_refresh=force_refresh)
         free_base = safe_float(client.get_free_balance(base_coin, balance_snapshot=full_balance))
@@ -404,7 +412,7 @@ def log_balances(
         }
 
 
-def require_balance_snapshot(balances: dict[str, Any], context: str) -> None:
+def require_balance_snapshot(balances: Dict[str, Any], context: str) -> None:
     if balances.get("full_balance") is None:
         raise RuntimeError(
             f"Failed to fetch balance during {context}. "
@@ -412,7 +420,7 @@ def require_balance_snapshot(balances: dict[str, Any], context: str) -> None:
         )
 
 
-def get_available_quote_balance(quote_coin: str, balances: dict[str, Any]) -> float:
+def get_available_quote_balance(quote_coin: str, balances: Dict[str, Any]) -> float:
     free_quote = safe_float(balances.get("free_quote"), 0.0)
     free_usd = safe_float(balances.get("free_usd"), 0.0)
     free_usdt = safe_float(balances.get("free_usdt"), 0.0)
@@ -425,8 +433,8 @@ def get_available_quote_balance(quote_coin: str, balances: dict[str, Any]) -> fl
 
 
 def get_total_portfolio_equity(
-    latest_price_by_base: dict[str, float],
-    balances: dict[str, Any],
+    latest_price_by_base: Dict[str, float],
+    balances: Dict[str, Any],
     quote_coin: str,
 ) -> float:
     total_equity = get_available_quote_balance(quote_coin, balances)
@@ -435,7 +443,7 @@ def get_total_portfolio_equity(
     if full_balance is None:
         return total_equity
 
-    seen_base_coins: set[str] = set()
+    seen_base_coins: Set[str] = set()
     for market in get_normalized_markets():
         base_coin = market["base_coin"]
         if base_coin in seen_base_coins:
@@ -456,13 +464,15 @@ def compute_entry_qty(
     latest_price: float,
     total_equity: float,
     target_alloc_pct: float,
+    qty_decimals: int,
 ) -> float:
     if latest_price <= 0 or total_equity <= 0 or target_alloc_pct <= 0:
         return 0.0
 
     target_notional = total_equity * target_alloc_pct
     raw_qty = target_notional / latest_price
-    qty = round_down(raw_qty, get_qty_decimals())
+    qty = round_down(raw_qty, qty_decimals)
+
     return qty if qty >= get_min_qty() else 0.0
 
 
@@ -471,23 +481,29 @@ def compute_top_up_qty(
     current_base: float,
     total_equity: float,
     target_alloc_pct: float,
-) -> tuple[float, float]:
-    target_qty = compute_entry_qty(latest_price, total_equity, target_alloc_pct)
+    qty_decimals: int,
+) -> Tuple[float, float]:
+    target_qty = compute_entry_qty(
+        latest_price=latest_price,
+        total_equity=total_equity,
+        target_alloc_pct=target_alloc_pct,
+        qty_decimals=qty_decimals,
+    )
     if target_qty <= 0:
         return 0.0, target_qty
 
-    gap_qty = round_down(max(target_qty - current_base, 0.0), get_qty_decimals())
+    gap_qty = round_down(max(target_qty - current_base, 0.0), qty_decimals)
     if gap_qty < get_min_qty():
         return 0.0, target_qty
 
     return gap_qty, target_qty
 
 
-def compute_exit_qty(free_base: float) -> float:
+def compute_exit_qty(free_base: float, qty_decimals: int) -> float:
     if get_close_full_position_on_exit():
-        qty = round_down(free_base, get_qty_decimals())
+        qty = round_down(free_base, qty_decimals)
     else:
-        qty = round_down(free_base * get_sell_buffer_ratio(), get_qty_decimals())
+        qty = round_down(free_base * get_sell_buffer_ratio(), qty_decimals)
 
     return qty if qty >= get_min_qty() else 0.0
 
@@ -514,7 +530,7 @@ def query_order_safely(pair: str, order_id: str = "") -> Any:
         return None
 
 
-def build_signal_kwargs() -> dict[str, Any]:
+def build_signal_kwargs() -> Dict[str, Any]:
     setting_map = {
         "window": "VWAP_WINDOW",
         "lower_std_mult": "LOWER_STD_MULT",
@@ -524,7 +540,7 @@ def build_signal_kwargs() -> dict[str, Any]:
     }
 
     signature = inspect.signature(generate_vwap_signal)
-    kwargs: dict[str, Any] = {}
+    kwargs: Dict[str, Any] = {}
 
     for arg_name, setting_name in setting_map.items():
         if arg_name not in signature.parameters:
@@ -540,9 +556,9 @@ def build_signal_kwargs() -> dict[str, Any]:
 
 
 def build_market_snapshot(
-    market: dict[str, Any],
-    signal_kwargs: dict[str, Any],
-) -> Optional[dict[str, Any]]:
+    market: Dict[str, Any],
+    signal_kwargs: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
     interval = get_str_setting("INTERVAL", "15m")
     limit = get_int_setting("LIMIT", 3000)
 
@@ -611,9 +627,9 @@ def build_market_snapshot(
 
 
 def process_market(
-    snapshot: dict[str, Any],
-    latest_price_by_base: dict[str, float],
-    signal_kwargs: dict[str, Any],
+    snapshot: Dict[str, Any],
+    latest_price_by_base: Dict[str, float],
+    signal_kwargs: Dict[str, Any],
 ) -> None:
     market = snapshot["market"]
     pair = market["roostoo_pair"]
@@ -621,6 +637,7 @@ def process_market(
     base_coin = market["base_coin"]
     quote_coin = market["quote_coin"]
     target_alloc_pct = market["target_alloc_pct"]
+    qty_decimals = market["qty_decimals"]
     market_key = market["market_key"]
 
     interval = get_str_setting("INTERVAL", "15m")
@@ -705,7 +722,7 @@ def process_market(
         and latest_close > 0
         and latest_close <= current_stop_loss_price
     ):
-        trade_qty = compute_exit_qty(live_base_qty)
+        trade_qty = compute_exit_qty(live_base_qty, qty_decimals)
 
         print(f"Computed STOP-LOSS SELL qty: {trade_qty}")
         print(f"Free base balance: {live_base_qty}")
@@ -746,6 +763,7 @@ def process_market(
             latest_price=latest_close,
             total_equity=total_equity_before_trade,
             target_alloc_pct=target_alloc_pct,
+            qty_decimals=qty_decimals,
         )
         target_qty_before_trade = trade_qty
         estimated_cost = trade_qty * latest_close
@@ -817,6 +835,7 @@ def process_market(
             current_base=live_base_qty,
             total_equity=total_equity_before_trade,
             target_alloc_pct=target_alloc_pct,
+            qty_decimals=qty_decimals,
         )
         needs_top_up = (
             target_qty_before_trade > 0
@@ -896,7 +915,7 @@ def process_market(
         )
 
     elif current_position == 1 and prev_signal == 1 and latest_signal == 0:
-        trade_qty = compute_exit_qty(live_base_qty)
+        trade_qty = compute_exit_qty(live_base_qty, qty_decimals)
 
         print(f"Computed SELL qty: {trade_qty}")
         print(f"Free base balance: {live_base_qty}")
@@ -1040,6 +1059,7 @@ def process_market(
                 "base_coin": base_coin,
                 "quote_coin": quote_coin,
                 "target_alloc_pct": target_alloc_pct,
+                "qty_decimals": qty_decimals,
                 "portfolio_total_equity_before_trade": total_equity_before_trade,
                 "interval": interval,
                 "candle_time": candle_time,
@@ -1090,8 +1110,6 @@ def process_market(
 
 
 def run_once() -> None:
-    print("Entered run_once")
-
     signal_kwargs = build_signal_kwargs()
     normalized_markets = get_normalized_markets()
 
