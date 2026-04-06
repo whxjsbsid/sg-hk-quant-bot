@@ -1,6 +1,6 @@
 # SG-HK Quant Bot
 
-A long-only quantitative trading bot built for the **SG vs HK University Web3 Quant Hackathon**.
+A long-only quantitative trading bot built for the **NUS Investment Society x IMC Web3 Quant Trading Hackathon**.
 
 This project was built with substantial AI assistance, with the author responsible for project direction, validation, testing, debugging, and final integration.
 
